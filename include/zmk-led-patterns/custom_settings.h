@@ -31,9 +31,10 @@
  * definition and the string is derived from it, and the registration passes
  * the token through a wrapper so that it expands before being stringified.
  *
- * The "amgskobo__" prefix is the convention the sibling modules already follow
- * (amgskobo__accel, amgskobo__rip, amgskobo__a2r), which is what keeps one
- * author's headings together in a client's list.
+ * The prefix is an author namespace. Subsystem ids are a flat global space
+ * shared by every module a firmware happens to load, so a bare "led" would be
+ * the obvious thing for two of them to pick; prefixing keeps one author's
+ * headings together in a client's list as well.
  */
 #define ZMK_LED_PATTERNS_SUBSYSTEM_TOKEN amgskobo__led
 #define ZMK_LED_PATTERNS_SUBSYSTEM STRINGIFY(ZMK_LED_PATTERNS_SUBSYSTEM_TOKEN)

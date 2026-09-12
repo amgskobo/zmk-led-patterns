@@ -4,9 +4,10 @@
  * The whole of what this module controls, as one struct.
  *
  * Two scalars and a switch form the persistent pattern state. Brightness is
- * deliberately local to the behavior during the split-stability stage: its
- * key commands must not invoke the separate global backlight relay that was
- * resetting this hardware pair.
+ * kept here rather than delegated to ZMK's backlight subsystem, so that one
+ * key press results in one split message: `&bl` has a global relay of its own,
+ * and driving both would put two senders on the split link for a single
+ * press.
  *
  * Handing the state over as one struct is what lets every entry point -- a
  * keymap binding, a relayed split command, a value edited in a Studio client

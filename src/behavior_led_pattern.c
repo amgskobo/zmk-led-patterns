@@ -81,17 +81,17 @@ static K_WORK_DELAYABLE_DEFINE(pattern_work, pattern_work_handler);
  * indicator below owns the LED until the two halves agree. */
 static uint8_t active_pattern = LED_PATTERN_BREATHE;
 static uint16_t speed_percent = LED_PATTERN_SPEED_NOMINAL;
-/* Kept in this behavior during the split-stability stage. Calling the ZMK
- * backlight behavior from a right-half key invokes its separate split relay,
- * which is the path proven to reset this particular pair. */
+/* Kept here rather than delegated to ZMK's backlight subsystem: `&bl` carries
+ * a global split relay of its own, and driving both would put two senders on
+ * the split link for a single key press. */
 static uint8_t brightness_percent = 100;
 static bool advertising_indicator = true;
 static int64_t pattern_started_at;
 static bool controller_ready;
 static bool advertising_blink;
 /* Set while ZMK reports the keyboard idle or asleep. The animation is the only
- * thing on this keyboard that would otherwise keep waking the core after the
- * last key press, so it stops and the LED goes dark until activity returns. */
+ * thing here that would otherwise keep waking the core after the last key
+ * press, so it stops and the LED goes dark until activity returns. */
 static bool animation_suspended;
 
 /*
@@ -704,9 +704,8 @@ static void write_led(uint8_t percent) {
 
 /*
  * The pattern says what shape and this behavior supplies its current ceiling.
- * It deliberately does not call the ZMK backlight behavior in this stage,
- * because that behavior's global split relay resets this hardware pair when a
- * right-half 5-way key invokes it.
+ * It deliberately does not go through ZMK's backlight behavior, whose own
+ * global split relay would send a second message for the same key press.
  */
 static void set_led_brightness(uint8_t pattern_level) {
     write_led((pattern_level * brightness_percent) / 100);
@@ -1098,11 +1097,12 @@ static const struct behavior_driver_api behavior_led_pattern_driver_api = {
     .binding_pressed = on_pattern_pressed,
     .binding_released = on_pattern_released,
     /*
-     * The central owns the state. Right-half key positions are already
-     * forwarded to it by standard ZMK split, so binding this behavior on
-     * either half works, and the peripheral learns the result from the mirror
-     * message rather than from a second local invocation -- the GLOBAL
-     * locality that used to do that is what reset this hardware pair.
+     * The central owns the state. Standard ZMK split already forwards a
+     * peripheral's key positions to it, so binding this behavior on either
+     * half works, and the peripheral learns the result from the mirror message
+     * rather than by running the behavior a second time locally -- which a
+     * GLOBAL locality would do, and which would decide the next pattern twice
+     * from two different starting points.
      */
     .locality = BEHAVIOR_LOCALITY_CENTRAL,
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)

@@ -3,15 +3,11 @@
  *
  * Publishes the LED state through zmk-feature-custom-settings.
  *
- * Deliberately the same shape as the sibling modules -- see
- * zmk-input-vector-acceleration's input_processor_vector_accel_custom_settings.c
- * and zmk-input-processors' four. Register a subsystem to own the namespace,
- * register the values, listen for the two settings events, and apply. Nothing
- * else: no work item, no poll, no gating on a flag of its own, and no private
- * split relay. Every one of those was tried here and every one of them broke
- * something -- a keyboard that would not boot, and then a client's edit that
- * silently did nothing -- while the plain shape is the one that is already
- * working on this keyboard for the pointer scaler and the acceleration curve.
+ * Register a subsystem to own the namespace, register the values, listen for
+ * the two settings events, and apply. Nothing else: no work item, no poll, no
+ * gating on a flag of its own, and no private split relay. Every one of those
+ * was tried and every one of them broke something -- a keyboard that would not
+ * boot, and then an edit in a client that silently did nothing.
  *
  * Only what ZMK has no equivalent of is registered here. Brightness and on/off
  * are not: those are `&bl`, ZMK's own backlight behavior, which already saves
@@ -63,7 +59,7 @@ static bool led_patterns_namespace_handler(const zmk_custom_CallRequest *request
  * module needs no protocol, no nanopb, and no page of its own.
  */
 static struct zmk_rpc_custom_subsystem_meta led_patterns_meta = {
-    ZMK_RPC_CUSTOM_SUBSYSTEM_UI_URLS("https://github.com/amgskobo/zmk-config-akkb46"),
+    ZMK_RPC_CUSTOM_SUBSYSTEM_UI_URLS("https://github.com/amgskobo/zmk-led-patterns"),
     .security = ZMK_STUDIO_RPC_HANDLER_UNSECURED,
 };
 
