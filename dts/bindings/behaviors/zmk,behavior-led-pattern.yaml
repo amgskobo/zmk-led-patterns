@@ -1,0 +1,11 @@
+description: Select, step or set the state of a single external LED
+
+compatible: "zmk,behavior-led-pattern"
+
+include: one_param.yaml
+
+properties:
+  "#binding-cells":
+    type: int
+    required: true
+    const: 1

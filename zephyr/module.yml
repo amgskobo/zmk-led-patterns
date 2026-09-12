@@ -1,0 +1,6 @@
+name: zmk-led-patterns
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    dts_root: .
