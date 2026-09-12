@@ -218,6 +218,18 @@ struct zmk_led_pattern_mirror {
     uint32_t elapsed_ms;
     bool advertising_blink;
     bool idle_off;
+    /*
+     * Whether the central considers the keyboard in use.
+     *
+     * The two halves do not see the same key presses. ZMK resets activity from
+     * zmk_position_state_changed, and a peripheral's presses reach both halves
+     * -- its own locally, the central's copy over the split -- while a
+     * central's reach only the central. So a peripheral left to its own
+     * activity goes dark after CONFIG_ZMK_IDLE_TIMEOUT of someone typing on
+     * the other half. The central sees every press from both halves, which
+     * makes it the half worth believing.
+     */
+    bool central_active;
 } __packed;
 
 ZMK_EVENT_DECLARE(zmk_led_pattern_mirror);
@@ -349,6 +361,7 @@ static void mirror_work_handler(struct k_work *work) {
         .elapsed_ms = (uint32_t)MAX(k_uptime_get() - pattern_started_at, (int64_t)0),
         .advertising_blink = advertising_blink,
         .idle_off = idle_off,
+        .central_active = activity_state == ZMK_ACTIVITY_ACTIVE,
     };
 
     raise_zmk_led_pattern_mirror(event);
@@ -420,6 +433,10 @@ static void schedule_mirror(k_timeout_t delay) {
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 
+/* What the central last said about activity. Only meaningful while the two are
+ * synced, so the status listener below clears it when the link goes. */
+static bool central_active;
+
 /* The ack leaves on the low-priority queue rather than from the relay receive
  * path it is answering, which runs on the Bluetooth receive thread. */
 static void ack_work_handler(struct k_work *work) {
@@ -450,6 +467,7 @@ static int led_pattern_mirror_listener(const zmk_event_t *eh) {
     speed_percent = CLAMP(event->speed, LED_PATTERN_SPEED_MIN, LED_PATTERN_SPEED_MAX);
     advertising_blink = event->advertising_blink;
     idle_off = event->idle_off;
+    central_active = event->central_active;
 
     set_split_stage(SPLIT_STAGE_SYNCED);
     /* Before the phase, because un-suspending restarts the clock and the
@@ -476,8 +494,12 @@ static int led_pattern_peripheral_status_listener(const zmk_event_t *eh) {
 
     if (status != NULL) {
         /* Back to the indicator on either edge: a reconnect has to re-agree
-         * the state rather than keep showing what the last session left. */
+         * the state rather than keep showing what the last session left. And
+         * with no link there is nothing to believe about the other half, so
+         * this one falls back to its own idle timer. */
+        central_active = false;
         set_split_stage(status->connected ? SPLIT_STAGE_LINKED : SPLIT_STAGE_WAITING);
+        apply_activity();
     }
     return ZMK_EV_EVENT_BUBBLE;
 }
@@ -900,7 +922,14 @@ static void refresh_pattern_output(void) {
  * already idle and the LED has to come back on without waiting for a key.
  */
 static void apply_activity(void) {
-    const bool suspend = idle_off && activity_state != ZMK_ACTIVITY_ACTIVE;
+    bool in_use = activity_state == ZMK_ACTIVITY_ACTIVE;
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    /* Either half's word is enough. The central's covers typing that never
+     * reaches here; this half's own covers its keys without waiting for a
+     * relay, and covers the case where there is no central to ask. */
+    in_use = in_use || central_active;
+#endif
+    const bool suspend = idle_off && !in_use;
 
     if (suspend == animation_suspended) {
         return;
@@ -922,6 +951,9 @@ static int led_pattern_activity_listener(const zmk_event_t *eh) {
 
     activity_state = event->state;
     apply_activity();
+    /* Twice per idle cycle, and the mirror carries the pattern's phase with
+     * it, so a wake re-agrees the curve as well as the fact of being awake. */
+    schedule_mirror(K_MSEC(MIRROR_DEBOUNCE_MS));
 
     return ZMK_EV_EVENT_BUBBLE;
 }
