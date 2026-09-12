@@ -135,7 +135,7 @@ adding the curve; the cycling commands and the settings range both follow.
 
 ## Studio settings
 
-`CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS=y` registers seven values under the
+`CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS=y` registers eight values under the
 `amgskobo__led` subsystem with a fixed `led.` key prefix:
 
 | key | type | range | default |
@@ -147,6 +147,7 @@ adding the curve; the cycling commands and the settings range both follow.
 | `led.ble_brightness` | int32 | 0 - 100 percent | 100 |
 | `led.ble_speed` | int32 | 10 - 400 percent | 100 |
 | `led.adv_blink` | bool | show the advertising indicator | true |
+| `led.idle_off` | bool | go dark once the keyboard is idle | true |
 
 A client renders these with no page of its own: the declared type and
 constraints drive the widget.
@@ -159,7 +160,9 @@ the pattern is: a keyboard on USB is on a desk in a lit room, and the same
 keyboard on BLE is as likely to be somewhere dark, where the number that reads
 as "on" is a different one. The advertising indicator is the one value that is
 not split, because it is about having no connection at all rather than about
-which one.
+which one. `led.idle_off` is shared for the same reason and one more: it has
+to mean the same thing on a peripheral, which has no endpoint to select a set
+with.
 
 A pattern is a plain 0 - 17 number rather than a named dropdown because the
 Studio RPC schema caps an options constraint at eight values and the handler
@@ -241,6 +244,18 @@ on a clock - at 40 ms, while one is actually being drawn.
 
 The animation also follows `zmk_activity_state_changed`: once ZMK reports the
 keyboard idle the LED goes dark and nothing is scheduled until the next press.
+Clearing `led.idle_off` buys the other policy - the animation keeps running for
+as long as the keyboard is powered - and it is the one setting here that really
+does cost battery rather than merely looking as though it might. The value is
+re-read rather than latched, so turning it off while the keyboard is *already*
+idle lights the LED straight away instead of waiting for a key.
+
+On a split the flag rides the mirror, so both halves follow it. That also
+settles an asymmetry in the default behaviour: ZMK resets activity from
+`zmk_position_state_changed`, and a peripheral's key presses reach both halves
+while a central's reach only the central - so typing on the central alone
+leaves the peripheral dark until it times back in. With `led.idle_off` cleared
+neither half ever goes dark, and the question does not arise.
 
 Both indicators use a true-zero dark phase rather than the 3-5% floor the
 blink-family patterns are drawn with. On nRF, Zephyr's PWM driver stops the PWM

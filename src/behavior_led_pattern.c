@@ -86,13 +86,18 @@ static uint16_t speed_percent = LED_PATTERN_SPEED_NOMINAL;
  * the split link for a single key press. */
 static uint8_t brightness_percent = 100;
 static bool advertising_indicator = true;
+/* Whether idle darkens the LED. The default is the cheap one. */
+static bool idle_off = true;
 static int64_t pattern_started_at;
 static bool controller_ready;
 static bool advertising_blink;
-/* Set while ZMK reports the keyboard idle or asleep. The animation is the only
- * thing here that would otherwise keep waking the core after the last key
- * press, so it stops and the LED goes dark until activity returns. */
+/* Set while the animation is being held dark: ZMK reports the keyboard idle
+ * and idle_off says to follow it. */
 static bool animation_suspended;
+/* This half's own view of ZMK's activity state, so the two inputs to that
+ * decision can change independently -- an idle timeout, and a setting edited
+ * while the keyboard is already idle. */
+static enum zmk_activity_state activity_state = ZMK_ACTIVITY_ACTIVE;
 
 /*
  * Everything this module schedules runs on ZMK's low-priority queue.
@@ -120,6 +125,7 @@ static int64_t elapsed_since(int64_t started_at) {
 
 static void refresh_pattern_output(void);
 static void schedule_mirror(k_timeout_t delay);
+static void apply_activity(void);
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 static bool should_show_advertising_blink(void);
 #endif
@@ -211,6 +217,7 @@ struct zmk_led_pattern_mirror {
      * restarting a breathing/blinking curve when a peripheral reconnects. */
     uint32_t elapsed_ms;
     bool advertising_blink;
+    bool idle_off;
 } __packed;
 
 ZMK_EVENT_DECLARE(zmk_led_pattern_mirror);
@@ -341,6 +348,7 @@ static void mirror_work_handler(struct k_work *work) {
         .speed = speed_percent,
         .elapsed_ms = (uint32_t)MAX(k_uptime_get() - pattern_started_at, (int64_t)0),
         .advertising_blink = advertising_blink,
+        .idle_off = idle_off,
     };
 
     raise_zmk_led_pattern_mirror(event);
@@ -441,8 +449,12 @@ static int led_pattern_mirror_listener(const zmk_event_t *eh) {
     brightness_percent = MIN(100, event->brightness);
     speed_percent = CLAMP(event->speed, LED_PATTERN_SPEED_MIN, LED_PATTERN_SPEED_MAX);
     advertising_blink = event->advertising_blink;
+    idle_off = event->idle_off;
 
     set_split_stage(SPLIT_STAGE_SYNCED);
+    /* Before the phase, because un-suspending restarts the clock and the
+     * relayed phase has to be the last word on this half. */
+    apply_activity();
     /* The only writer of this half's pattern clock, and the reason a stage
      * change must not touch it. What is left over is the one-way relay
      * latency: the send itself, and however long the split link waits for a
@@ -876,21 +888,22 @@ static void refresh_pattern_output(void) {
 /*
  * The animation is the only thing here that would keep the core awake.
  *
- * ZMK already tracks whether anyone is using the keyboard, so the cheapest
- * possible policy is to follow it: at CONFIG_ZMK_IDLE_TIMEOUT after the last
- * key press the LED goes dark -- a zero duty, so the PWM peripheral stops as
- * well -- and nothing is scheduled at all until the next press.
+ * ZMK already tracks whether anyone is using the keyboard, so the cheap policy
+ * is to follow it: at CONFIG_ZMK_IDLE_TIMEOUT after the last key press the LED
+ * goes dark -- a zero duty, so the PWM peripheral stops as well -- and nothing
+ * is scheduled at all until the next press. Clearing led.idle_off buys the
+ * other policy, and it is the one thing in this module that really does cost
+ * battery rather than merely looking as though it might.
+ *
+ * Both inputs are re-read here rather than latched, because either can move on
+ * its own: the timeout fires, or the setting is edited while the keyboard is
+ * already idle and the LED has to come back on without waiting for a key.
  */
-static int led_pattern_activity_listener(const zmk_event_t *eh) {
-    const struct zmk_activity_state_changed *event = as_zmk_activity_state_changed(eh);
+static void apply_activity(void) {
+    const bool suspend = idle_off && activity_state != ZMK_ACTIVITY_ACTIVE;
 
-    if (event == NULL) {
-        return ZMK_EV_EVENT_BUBBLE;
-    }
-
-    const bool suspend = event->state != ZMK_ACTIVITY_ACTIVE;
     if (suspend == animation_suspended) {
-        return ZMK_EV_EVENT_BUBBLE;
+        return;
     }
 
     animation_suspended = suspend;
@@ -898,6 +911,17 @@ static int led_pattern_activity_listener(const zmk_event_t *eh) {
         pattern_started_at = k_uptime_get();
     }
     refresh_pattern_output();
+}
+
+static int led_pattern_activity_listener(const zmk_event_t *eh) {
+    const struct zmk_activity_state_changed *event = as_zmk_activity_state_changed(eh);
+
+    if (event == NULL) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    activity_state = event->state;
+    apply_activity();
 
     return ZMK_EV_EVENT_BUBBLE;
 }
@@ -922,6 +946,7 @@ void led_pattern_get_state(struct led_pattern_state *out) {
     out->pattern = active_pattern;
     out->speed = speed_percent;
     out->advertising_indicator = advertising_indicator;
+    out->idle_off = idle_off;
 }
 
 uint8_t led_pattern_get_brightness(void) { return brightness_percent; }
@@ -940,6 +965,11 @@ void led_pattern_set_state(const struct led_pattern_state *state) {
     active_pattern = pattern;
     speed_percent = CLAMP(state->speed, LED_PATTERN_SPEED_MIN, LED_PATTERN_SPEED_MAX);
     advertising_indicator = state->advertising_indicator;
+    idle_off = state->idle_off;
+    /* Before the log line and the redraw: turning idle_off off while the
+     * keyboard is already idle has to light the LED now, not at the next key
+     * press. */
+    apply_activity();
 
     if (pattern_changed) {
         /* Asking for a pattern is asking to see it, so it wins over the status
@@ -1162,7 +1192,8 @@ static const struct behavior_driver_api behavior_led_pattern_driver_api = {
 static int behavior_led_pattern_init(const struct device *dev) {
     ARG_UNUSED(dev);
     controller_ready = true;
-    animation_suspended = zmk_activity_get_state() != ZMK_ACTIVITY_ACTIVE;
+    activity_state = zmk_activity_get_state();
+    animation_suspended = idle_off && activity_state != ZMK_ACTIVITY_ACTIVE;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
     /* Both halves come up on the waiting indicator, and neither leaves it
      * until the state exchange has actually been acknowledged. */

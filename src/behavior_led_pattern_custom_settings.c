@@ -139,6 +139,20 @@ LED_PATTERN_TRANSPORT_SETTINGS(ble, LED_PATTERN_BREATHE)
 LED_PATTERN_SETTING(led_pattern_cs_adv_blink, "adv_blink", ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL,
                     ZMK_CUSTOM_SETTING_VALUE_BOOL(true), ZMK_CUSTOM_SETTING_NO_CONSTRAINT)
 
+/*
+ * Also not per transport, and the one setting here with a real running cost.
+ *
+ * On by default: the LED follows ZMK's idle state and goes dark, which is what
+ * lets the core be left alone between key presses. Turning it off keeps the
+ * animation running for as long as the keyboard is powered. It is one switch
+ * rather than one per transport because it is a policy about the battery
+ * rather than a choice about how the light should look, and because the value
+ * has to mean the same thing on a peripheral, which has no endpoint to select
+ * a set with.
+ */
+LED_PATTERN_SETTING(led_pattern_cs_idle_off, "idle_off", ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL,
+                    ZMK_CUSTOM_SETTING_VALUE_BOOL(true), ZMK_CUSTOM_SETTING_NO_CONSTRAINT)
+
 struct transport_settings {
     const char *name;
     const struct zmk_custom_setting *pattern;
@@ -222,6 +236,7 @@ static void led_pattern_apply_settings(void) {
     int32_t speed;
     int32_t brightness;
     bool adv_blink;
+    bool idle_off;
 
     led_pattern_get_state(&state);
 
@@ -237,9 +252,12 @@ static void led_pattern_apply_settings(void) {
     if (read_bool(&led_pattern_cs_adv_blink, &adv_blink)) {
         state.advertising_indicator = adv_blink;
     }
+    if (read_bool(&led_pattern_cs_idle_off, &idle_off)) {
+        state.idle_off = idle_off;
+    }
 
-    LOG_INF("led: applying %s -> pattern %u speed %u indicator %d", live->name, state.pattern,
-            state.speed, (int)state.advertising_indicator);
+    LOG_INF("led: applying %s -> pattern %u speed %u indicator %d idle-off %d", live->name,
+            state.pattern, state.speed, (int)state.advertising_indicator, (int)state.idle_off);
 
     led_pattern_set_state(&state);
 }

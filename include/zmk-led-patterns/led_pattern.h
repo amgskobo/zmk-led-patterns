@@ -33,6 +33,10 @@ struct led_pattern_state {
     uint16_t speed;
     /* Whether an unconnected central overrides the pattern with its blink. */
     bool advertising_indicator;
+    /* Whether the LED goes dark once ZMK reports the keyboard idle. Clearing
+     * it keeps the animation running, which is the one setting here that
+     * costs real battery: it is what stops the core from being left alone. */
+    bool idle_off;
 };
 
 /* Never fails; the controller has one static instance and no probe step. */
