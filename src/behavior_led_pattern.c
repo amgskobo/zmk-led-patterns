@@ -111,6 +111,13 @@ static inline void schedule_pattern_work(k_timeout_t delay) {
     k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &pattern_work, delay);
 }
 
+/* Never negative: the table lookups index by elapsed/step, so a start stamp in
+ * the future -- which only a malformed relayed phase could produce -- would
+ * otherwise index before the front of a level table. */
+static int64_t elapsed_since(int64_t started_at) {
+    return MAX(k_uptime_get() - started_at, (int64_t)0);
+}
+
 static void refresh_pattern_output(void);
 static void schedule_mirror(k_timeout_t delay);
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
@@ -149,14 +156,16 @@ enum split_stage {
  *
  * The link is reported as up before the central has discovered and subscribed
  * to the peripheral's relay characteristic, and a write sent before that is
- * dropped by the transport. Three seconds is comfortably past it, and it is
- * also long enough that Steady is legible as a stage of its own rather than a
- * flicker. The retries are bounded -- four sends, then the LED is left saying
- * "linked, never synced" -- so nothing here can become a loop.
+ * dropped by the transport. Five seconds is comfortably past it, and it is
+ * also long enough that Steady reads as a stage of its own rather than as a
+ * flicker while someone is watching the pair come up. The exchange then runs
+ * from five seconds to seven: five sends, half a second apart, and then the
+ * LED is left saying "linked, never synced". The count is bounded, so nothing
+ * here can become a loop.
  */
-#define SPLIT_SYNC_START_DELAY_MS 3000
-#define SPLIT_SYNC_ACK_TIMEOUT_MS 600
-#define SPLIT_SYNC_MAX_ATTEMPTS 4
+#define SPLIT_SYNC_START_DELAY_MS 5000
+#define SPLIT_SYNC_ACK_TIMEOUT_MS 500
+#define SPLIT_SYNC_MAX_ATTEMPTS 5
 
 static enum split_stage split_stage = SPLIT_STAGE_WAITING;
 static int64_t split_stage_started_at;
@@ -171,9 +180,19 @@ static void set_split_stage(enum split_stage stage) {
     LOG_INF("led: split stage %d -> %d", (int)split_stage, (int)stage);
     split_stage = stage;
     split_stage_started_at = k_uptime_get();
-    /* The normal pattern restarts from the top of its cycle when the indicator
-     * hands the LED back, so a release is visible as a fresh curve. */
-    pattern_started_at = split_stage_started_at;
+    /*
+     * The pattern clock is deliberately left alone.
+     *
+     * The indicator has its own clock (split_stage_started_at) and the pattern
+     * keeps running underneath it, unseen, from boot. Restarting the pattern
+     * here is what put the two halves out of phase at boot: the central
+     * advertised a phase measured before the reset and then reset itself when
+     * the acknowledgement arrived, so the peripheral came up
+     * SPLIT_SYNC_START_DELAY_MS into the curve while the central came up at
+     * zero. With Breathe's two-second period and a delay of three, five or
+     * seven seconds that lands exactly half a cycle out every time, which is
+     * why retuning the delay could never have fixed it.
+     */
     refresh_pattern_output();
 }
 
@@ -206,10 +225,15 @@ ZMK_EVENT_IMPL(zmk_led_pattern_mirror);
  * yet and says so only in a log line -- so without this the indicator could
  * only ever claim success. `lea` is three characters for the same reason
  * `led` is.
+ *
+ * It carries the phase the peripheral ended up on as well as the pattern, so
+ * the central can log the skew between the two halves rather than leaving
+ * "they look slightly out" as something only an eye can report.
  */
 struct zmk_led_pattern_ack {
     uint8_t source;
     uint8_t pattern;
+    uint32_t elapsed_ms;
 } __packed;
 
 ZMK_EVENT_DECLARE(zmk_led_pattern_ack);
@@ -313,7 +337,13 @@ static int led_pattern_ack_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    LOG_INF("led: peripheral %u acknowledged pattern %u", ack->source, ack->pattern);
+    /*
+     * Positive means the peripheral is ahead of this half. It is the one-way
+     * relay latency plus the ack's own trip, so a few tens of milliseconds is
+     * the floor; anything near a pattern period is a real fault.
+     */
+    LOG_INF("led: peripheral %u acknowledged pattern %u, phase skew %d ms", ack->source,
+            ack->pattern, (int)(ack->elapsed_ms - elapsed_since(pattern_started_at)));
 
     /* Only the connect-time exchange is cancelled, and only while it is still
      * the thing running. Every mirror is acknowledged, including the ones sent
@@ -364,6 +394,7 @@ static void ack_work_handler(struct k_work *work) {
     struct zmk_led_pattern_ack event = {
         .source = ZMK_RELAY_EVENT_SOURCE_SELF,
         .pattern = active_pattern,
+        .elapsed_ms = (uint32_t)elapsed_since(pattern_started_at),
     };
 
     raise_zmk_led_pattern_ack(event);
@@ -385,12 +416,11 @@ static int led_pattern_mirror_listener(const zmk_event_t *eh) {
     speed_percent = CLAMP(event->speed, LED_PATTERN_SPEED_MIN, LED_PATTERN_SPEED_MAX);
     advertising_blink = event->advertising_blink;
 
-    /* Before the phase is set, not after: releasing the indicator restarts the
-     * pattern clock, and the whole point of carrying elapsed_ms is that this
-     * half picks the curve up where the central is rather than at zero. */
     set_split_stage(SPLIT_STAGE_SYNCED);
-    /* Match the central's phase, allowing only the one-way relay latency of
-     * roughly 8 ms rather than restarting the curve at zero on reconnect. */
+    /* The only writer of this half's pattern clock, and the reason a stage
+     * change must not touch it. What is left over is the one-way relay
+     * latency: the send itself, and however long the split link waits for a
+     * connection event it is allowed to skip. */
     pattern_started_at = k_uptime_get() - event->elapsed_ms;
 
     refresh_pattern_output();
@@ -732,13 +762,6 @@ static uint32_t hold_to_wall_ms(uint32_t hold_ms) {
     const uint64_t wall = ((uint64_t)hold_ms * LED_PATTERN_SPEED_NOMINAL) / speed;
 
     return (uint32_t)CLAMP(wall, 1, UINT32_MAX);
-}
-
-/* Never negative: the table lookups index by elapsed/step, so a start stamp in
- * the future -- which only a malformed relayed phase could produce -- would
- * otherwise index before the front of a level table. */
-static int64_t elapsed_since(int64_t started_at) {
-    return MAX(k_uptime_get() - started_at, (int64_t)0);
 }
 
 static void pattern_work_handler(struct k_work *work) {
