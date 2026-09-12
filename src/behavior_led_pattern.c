@@ -266,14 +266,30 @@ static uint8_t sync_attempts;
 static void mirror_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(mirror_work, mirror_work_handler);
 
-static bool is_peripheral_conn(struct bt_conn *conn) {
+/*
+ * A link this half opened is one where it holds the central role, which is
+ * exactly ZMK's own test for "not a host connection" in ble.c. The role is
+ * logged either way: if the indicator is stuck on the waiting blink, the
+ * question is whether no connection is happening at all or whether one is
+ * happening and being filtered out here, and only a log can tell those apart.
+ */
+static bool is_peripheral_conn(struct bt_conn *conn, const char *what, uint8_t err) {
     struct bt_conn_info info;
 
-    return bt_conn_get_info(conn, &info) == 0 && info.role == BT_CONN_ROLE_CENTRAL;
+    if (bt_conn_get_info(conn, &info) != 0) {
+        LOG_WRN("led: %s for a connection with no info", what);
+        return false;
+    }
+
+    const bool is_peripheral_link = info.role == BT_CONN_ROLE_CENTRAL;
+    LOG_INF("led: %s, role %d (%s), status %u", what, (int)info.role,
+            is_peripheral_link ? "split peer" : "host", err);
+
+    return is_peripheral_link;
 }
 
 static void split_conn_connected(struct bt_conn *conn, uint8_t err) {
-    if (err != 0 || !is_peripheral_conn(conn)) {
+    if (!is_peripheral_conn(conn, "connected", err) || err != 0) {
         return;
     }
 
@@ -285,9 +301,7 @@ static void split_conn_connected(struct bt_conn *conn, uint8_t err) {
 }
 
 static void split_conn_disconnected(struct bt_conn *conn, uint8_t reason) {
-    ARG_UNUSED(reason);
-
-    if (!is_peripheral_conn(conn)) {
+    if (!is_peripheral_conn(conn, "disconnected", reason)) {
         return;
     }
 
@@ -296,7 +310,16 @@ static void split_conn_disconnected(struct bt_conn *conn, uint8_t reason) {
     set_split_stage(SPLIT_STAGE_WAITING);
 }
 
-BT_CONN_CB_DEFINE(led_pattern_split_conn_cb) = {
+/*
+ * Registered at run time rather than with BT_CONN_CB_DEFINE.
+ *
+ * Both are dispatched by notify_connected(), and the static form needs its
+ * iterable-section entry to survive --gc-sections out of a module's own
+ * archive. ZMK registers its own two sets of connection callbacks this way, in
+ * ble.c and in the split central, so this is the path with proof behind it and
+ * the static one is not worth the doubt.
+ */
+static struct bt_conn_cb split_conn_callbacks = {
     .connected = split_conn_connected,
     .disconnected = split_conn_disconnected,
 };
@@ -307,6 +330,9 @@ static void mirror_work_handler(struct k_work *work) {
     if (!peripheral_link_up) {
         return;
     }
+
+    LOG_INF("led: mirroring pattern %u to the peripheral (attempt %u)", active_pattern,
+            sync_attempts + 1);
 
     struct zmk_led_pattern_mirror event = {
         .source = ZMK_RELAY_EVENT_SOURCE_SELF,
@@ -1141,6 +1167,15 @@ static int behavior_led_pattern_init(const struct device *dev) {
     /* Both halves come up on the waiting indicator, and neither leaves it
      * until the state exchange has actually been acknowledged. */
     split_stage_started_at = k_uptime_get();
+#endif
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    /* Before bt_enable(): registering a connection callback is an slist
+     * append, and this init runs at POST_KERNEL, ahead of every APPLICATION
+     * init including Bluetooth's. */
+    int err = bt_conn_cb_register(&split_conn_callbacks);
+    if (err < 0) {
+        LOG_ERR("led: failed to register split connection callbacks (%d)", err);
+    }
 #endif
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     refresh_connection_state();
