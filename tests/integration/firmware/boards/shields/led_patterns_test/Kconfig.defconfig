@@ -1,0 +1,9 @@
+# Copyright (c) 2026 amgskobo
+# SPDX-License-Identifier: MIT
+
+if SHIELD_LED_PATTERNS_TEST
+
+config ZMK_KEYBOARD_NAME
+    default "LED patterns"
+
+endif

@@ -1,30 +1,25 @@
 /*
  * SPDX-License-Identifier: MIT
  *
- * The one parameter of &led_pattern, and everything it can say.
+ * The parameters of the three LED behaviors, one setting each.
  *
- * Only what ZMK has no equivalent of. Brightness and on/off are not here:
- * those are `&bl` (BL_INC, BL_DEC, BL_TOG, BL_SET), ZMK's own backlight
- * behavior, which already persists its value, relays it to both split halves
- * and draws itself properly in a Studio keymap editor. This module scales its
- * patterns by whatever brightness that subsystem is holding.
+ *     &led_pattern     0 - 17          select this exact pattern
+ *                      100, 101        previous / next pattern, wrapping around
+ *     &led_brightness  0 - 100         set the brightness to this percentage
+ *                      200, 201        ten down / up, between 0 and 100
+ *     &led_speed       10 - 400        set the speed to this percentage
+ *                      500, 501        ten down / up, between 10 and 400
+ *                      502, 503, 504   the minimum, default and maximum speed
  *
- * What is left is the shape of the animation and how fast it runs, told apart
- * by which band the number falls in:
- *
- *     0 - 17      select this exact pattern
- *     100 - 103   previous / next pattern, brightness down / up
- *     410 - 800   set the speed to an exact percentage
- *
- * The absolute speed band exists because a split central has to be able to
- * tell a peripheral what the state now *is*, not how it changed: "next
- * pattern" only keeps two halves together for as long as both started from the
- * same place. It is an ordinary keymap parameter too.
+ * A binding edits the setting its behavior is named after, for the transport
+ * the keyboard is on now, so a key and a value edited in a client are the same
+ * value. This module owns the LED, so brightness lives here rather than on
+ * ZMK's `&bl`, which belongs to a backlight subsystem this module does not use.
  */
 
 #pragma once
 
-/* Argument for &led_pattern: select this exact pattern. */
+/* &led_pattern: select this exact pattern. */
 #define LED_PATTERN_STEADY        0
 #define LED_PATTERN_BREATHE       1
 #define LED_PATTERN_HEARTBEAT     2
@@ -48,14 +43,21 @@
  * curve; the cycling commands and the settings range both follow. */
 #define LED_PATTERN_COUNT 18
 
-/* Named actions are outside the pattern-number range (0-17). */
+/* &led_pattern: step to the previous or next pattern. Outside 0-17. */
 #define LED_PATTERN_PREVIOUS 100
 #define LED_PATTERN_NEXT     101
-#define LED_PATTERN_BRIGHTNESS_UP 102
-#define LED_PATTERN_BRIGHTNESS_DOWN 103
 
-/* Absolute speed. pct is 10-400: a tenth of the drawn rate through four times
- * it. The argument is a percentage in the same units the setting uses, so a
- * relayed command and an edited value are the same number. */
-#define LED_PATTERN_SPEED_BASE 400
-#define LED_PATTERN_SPEED(pct) (LED_PATTERN_SPEED_BASE + (pct))
+/* &led_brightness: ten points down or up. Outside 0-100, where every value
+ * sets that percentage. Down reaches 0, the LED's low-power state: the PWM
+ * output stops and nothing is redrawn until the brightness rises again. */
+#define LED_BRIGHTNESS_DOWN 200
+#define LED_BRIGHTNESS_UP   201
+
+/* &led_speed: ten points down or up, and the three fixed speeds -- 10, 100 and
+ * 400 percent of the rate each pattern was drawn at. Outside 10-400, where
+ * every value sets that percentage. */
+#define LED_SPEED_DOWN    500
+#define LED_SPEED_UP      501
+#define LED_SPEED_MIN     502
+#define LED_SPEED_DEFAULT 503
+#define LED_SPEED_MAX     504

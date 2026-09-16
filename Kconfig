@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: MIT
 
 DT_COMPAT_ZMK_BEHAVIOR_LED_PATTERN := zmk,behavior-led-pattern
+DT_COMPAT_ZMK_BEHAVIOR_LED_BRIGHTNESS := zmk,behavior-led-brightness
+DT_COMPAT_ZMK_BEHAVIOR_LED_SPEED := zmk,behavior-led-speed
 
 config ZMK_LED_PATTERNS
     bool "LED patterns"
     default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_LED_PATTERN))
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_LED_BRIGHTNESS))
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_LED_SPEED))
+    # Only the LED API. The zmk,backlight chosen node is read to find the LED
+    # and nothing else of ZMK's backlight subsystem is used; with that subsystem
+    # enabled as well, backlight.c writes the same LED at boot and &bl becomes a
+    # second owner of it.
+    select LED
     # A split mirror is sent as one compact state event after the central has
     # applied a key command. It deliberately does not invoke a behavior on the
     # peripheral: that old GLOBAL behavior route reset this hardware pair.
-    depends on ZMK_BACKLIGHT
     select ZMK_SPLIT_RELAY_EVENT if ZMK_SPLIT
     # Every redraw and every split mirror runs here rather than on the system
     # work queue, which is also where ZMK posts update_advertising_work: an
@@ -16,29 +24,36 @@ config ZMK_LED_PATTERNS
     # findable again after a host disconnect.
     select ZMK_LOW_PRIORITY_WORK_QUEUE
     help
-      Animates one external LED through the zmk,backlight chosen node. Its
-      one parameter selects a pattern, steps to the next or previous one, or
-      sets the speed to an exact percentage.
+      Animates one external LED through the zmk,backlight chosen node, with a
+      behavior per setting: &led_pattern selects a pattern or steps through
+      them, &led_brightness sets or steps the brightness down to an unlit,
+      low-power zero, and &led_speed sets or steps the speed. The
+      &led_pattern node owns the controller and has to exist
+      for the other two. ZMK's own backlight subsystem is not needed; leave
+      CONFIG_ZMK_BACKLIGHT off.
 
-      Brightness is adjusted in ten-percent steps by this behavior. On a
-      split, the central mirrors its final pattern, speed, and brightness
+      On a split, the central mirrors its final pattern, speed, and brightness
       state to the peripheral through ZMK's relay-event transport.
 
 if ZMK_LED_PATTERNS
 
 config ZMK_LED_PATTERNS_CUSTOM_SETTINGS
-    bool "Publish the pattern and speed through zmk-feature-custom-settings"
+    bool "Publish the LED state through zmk-feature-custom-settings"
     # Not ZMK_CUSTOM_SETTINGS: registering a subsystem needs zmk/studio/custom.h,
     # which includes ZMK's nanopb-generated proto/zmk/custom.pb.h. That is only
     # generated when the Studio RPC is being built, so the base registry alone
     # would let this be selected and then fail on a missing header.
     depends on ZMK_CUSTOM_SETTINGS_STUDIO_RPC
     help
-      Registers a pattern and a speed per transport (USB and BLE), plus the
-      advertising indicator, in the cross-module custom settings registry, so a
-      Studio client lists and edits them with no page of its own. The live pair
-      follows zmk_endpoint_changed, so the LED says which host the keyboard is
-      on. Nothing about brightness is registered -- that is &bl's.
+      Registers a pattern, brightness, speed and idle-off switch per transport
+      (USB and BLE), plus the advertising indicator, in the cross-module
+      custom settings registry, so a Studio client lists and edits them with
+      no page of its own. The live set follows zmk_endpoint_changed, so the
+      LED says which host the keyboard is on.
+
+      The settings become the one owner of the LED state: a keymap binding
+      writes the live transport's setting rather than the LED, in memory at
+      once and to flash three seconds after the last press.
 
       Needs zmk-feature-custom-settings, and so the patched ZMK that carries
       the custom Studio RPC protocol; with this off, which is the default and
