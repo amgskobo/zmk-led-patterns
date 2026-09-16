@@ -35,6 +35,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define LED_INDEX 0
 
+BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 1,
+             "declare exactly one zmk,behavior-led-pattern node");
+
 /*
  * The one clock left, and it runs only while a ramp is being drawn.
  *
@@ -851,6 +854,20 @@ static void pattern_work_handler(struct k_work *work) {
     }
 #endif
 
+    /*
+     * Brightness zero is the LED's low-power state, not merely a dark pattern.
+     * Every level below is scaled by the brightness, so there would be nothing
+     * to see; what would be left is the cost of the redraws themselves -- a
+     * ramp wakes every RAMP_STEP_MS. One zero write lets the PWM peripheral
+     * stop, and nothing is scheduled: raising the brightness goes through
+     * refresh_pattern_output(), which runs this handler again, and the curve
+     * picks up wherever the pattern clock has got to.
+     */
+    if (brightness_percent == 0) {
+        write_led(0);
+        return;
+    }
+
     const int64_t elapsed_ms = elapsed_since(pattern_started_at);
     struct pattern_sample sample;
     uint32_t delay_ms;
@@ -1079,64 +1096,83 @@ ZMK_LISTENER(led_pattern_endpoint, led_pattern_endpoint_listener);
 ZMK_SUBSCRIPTION(led_pattern_endpoint, zmk_endpoint_changed);
 #endif
 
-/* ===== Behavior ===== */
+/* ===== Requests from the behaviors ===== */
 
-/*
- * One parameter, three bands, one resulting state.
- *
- * Every band is decoded into a whole state and applied through the one setter,
- * so a keymap binding, a relayed absolute command and a value edited in a
- * client cannot drift apart: there is a single place that clamps, a single
- * place that decides whether the animation restarts, and a single place that
- * reports the result.
- */
-static bool decode_command(uint32_t param, struct led_pattern_state *state) {
-    if (param < LED_PATTERN_COUNT) {
-        state->pattern = (uint8_t)param;
-        return true;
-    }
+bool led_pattern_ready(void) { return device_is_ready(backlight); }
 
-    switch (param) {
-    case LED_PATTERN_PREVIOUS:
-        state->pattern = (state->pattern + LED_PATTERN_COUNT - 1) % LED_PATTERN_COUNT;
-        return true;
-    case LED_PATTERN_NEXT:
-        state->pattern = (state->pattern + 1) % LED_PATTERN_COUNT;
-        return true;
-    case LED_PATTERN_BRIGHTNESS_UP:
-        brightness_percent = MIN(100, brightness_percent + 10);
-        return true;
-    case LED_PATTERN_BRIGHTNESS_DOWN:
-        brightness_percent = brightness_percent < 10 ? 0 : brightness_percent - 10;
-        return true;
+int32_t led_pattern_field_value(enum led_pattern_field field) {
+    switch (field) {
+    case LED_PATTERN_FIELD_PATTERN:
+        return active_pattern;
+    case LED_PATTERN_FIELD_BRIGHTNESS:
+        return brightness_percent;
+    case LED_PATTERN_FIELD_SPEED:
+        return speed_percent;
     default:
-        break;
+        return 0;
     }
-
-    if (param >= LED_PATTERN_SPEED(LED_PATTERN_SPEED_MIN) &&
-        param <= LED_PATTERN_SPEED(LED_PATTERN_SPEED_MAX)) {
-        state->speed = (uint16_t)(param - LED_PATTERN_SPEED_BASE);
-        return true;
-    }
-
-    return false;
 }
 
+/* Straight onto the LED: for a build with no settings to own the value, and
+ * for the rare write the settings refuse. */
+static void apply_request(enum led_pattern_field field, int32_t value) {
+    struct led_pattern_state state;
+
+    if (field == LED_PATTERN_FIELD_BRIGHTNESS) {
+        led_pattern_set_brightness((uint8_t)CLAMP(value, 0, 100));
+        return;
+    }
+
+    led_pattern_get_state(&state);
+    if (field == LED_PATTERN_FIELD_PATTERN) {
+        state.pattern = (uint8_t)CLAMP(value, 0, LED_PATTERN_COUNT - 1);
+    } else {
+        state.speed = (uint16_t)CLAMP(value, LED_PATTERN_SPEED_MIN, LED_PATTERN_SPEED_MAX);
+    }
+    led_pattern_set_state(&state);
+}
+
+void led_pattern_request(enum led_pattern_field field, int32_t value) {
+#if IS_ENABLED(CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS)
+    /* The setting is the owner: its change event is what reaches the LED. */
+    if (led_pattern_settings_store(field, value) == 0) {
+        return;
+    }
+#endif
+    apply_request(field, value);
+}
+
+/* ===== &led_pattern ===== */
+
+/*
+ * A pattern number, or a step through them. Brightness and speed are behaviors
+ * of their own, so every binding names the one setting it changes. A step
+ * starts from what the LED is showing, which a settings write has already
+ * updated by the time the next press arrives.
+ */
 static int on_pattern_pressed(struct zmk_behavior_binding *binding,
                               struct zmk_behavior_binding_event event) {
     ARG_UNUSED(event);
 
-    if (!device_is_ready(backlight)) {
+    if (!led_pattern_ready()) {
         return -ENODEV;
     }
 
-    struct led_pattern_state state;
+    const int32_t current = led_pattern_field_value(LED_PATTERN_FIELD_PATTERN);
+    int32_t pattern;
 
-    led_pattern_get_state(&state);
-    if (decode_command(binding->param1, &state)) {
-        led_pattern_set_state(&state);
+    if (binding->param1 < LED_PATTERN_COUNT) {
+        pattern = (int32_t)binding->param1;
+    } else if (binding->param1 == LED_PATTERN_PREVIOUS) {
+        pattern = (current + LED_PATTERN_COUNT - 1) % LED_PATTERN_COUNT;
+    } else if (binding->param1 == LED_PATTERN_NEXT) {
+        pattern = (current + 1) % LED_PATTERN_COUNT;
+    } else {
+        LOG_WRN("led: &led_pattern has no command %u", binding->param1);
+        return ZMK_BEHAVIOR_OPAQUE;
     }
 
+    led_pattern_request(LED_PATTERN_FIELD_PATTERN, pattern);
     return ZMK_BEHAVIOR_OPAQUE;
 }
 
@@ -1182,14 +1218,6 @@ static const struct behavior_parameter_value_metadata param1_values[] = {
     LED_PATTERN_NAMED_VALUE("Fade blink", LED_PATTERN_FADE_BLINK),
     LED_PATTERN_NAMED_VALUE("Previous pattern", LED_PATTERN_PREVIOUS),
     LED_PATTERN_NAMED_VALUE("Next pattern", LED_PATTERN_NEXT),
-    LED_PATTERN_NAMED_VALUE("Brightness up", LED_PATTERN_BRIGHTNESS_UP),
-    LED_PATTERN_NAMED_VALUE("Brightness down", LED_PATTERN_BRIGHTNESS_DOWN),
-    {
-        .display_name = "Set speed (400 + percent)",
-        .type = BEHAVIOR_PARAMETER_VALUE_TYPE_RANGE,
-        .range = {.min = LED_PATTERN_SPEED(LED_PATTERN_SPEED_MIN),
-                  .max = LED_PATTERN_SPEED(LED_PATTERN_SPEED_MAX)},
-    },
 };
 
 static const struct behavior_parameter_metadata_set metadata_set = {

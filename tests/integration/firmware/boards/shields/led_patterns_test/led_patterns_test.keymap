@@ -1,0 +1,35 @@
+/*
+ * Copyright (c) 2026 amgskobo
+ * SPDX-License-Identifier: MIT
+ */
+
+#include <behaviors.dtsi>
+#include <dt-bindings/zmk/keys.h>
+#include <dt-bindings/zmk/led_pattern.h>
+
+/ {
+    behaviors {
+        led_pattern: led_pattern {
+            compatible = "zmk,behavior-led-pattern";
+            #binding-cells = <1>;
+        };
+
+        led_brightness: led_brightness {
+            compatible = "zmk,behavior-led-brightness";
+            #binding-cells = <1>;
+        };
+
+        led_speed: led_speed {
+            compatible = "zmk,behavior-led-speed";
+            #binding-cells = <1>;
+        };
+    };
+
+    keymap {
+        compatible = "zmk,keymap";
+
+        default_layer {
+            bindings = <&led_pattern LED_PATTERN_NEXT>;
+        };
+    };
+};

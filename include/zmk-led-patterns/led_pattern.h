@@ -26,6 +26,10 @@
 #define LED_PATTERN_SPEED_NOMINAL 100
 #define LED_PATTERN_SPEED_MAX 400
 
+/* How far &led_brightness's and &led_speed's down and up move, in points. */
+#define LED_PATTERN_BRIGHTNESS_STEP 10
+#define LED_PATTERN_SPEED_STEP 10
+
 struct led_pattern_state {
     /* LED_PATTERN_STEADY .. LED_PATTERN_FADE_BLINK. */
     uint8_t pattern;
@@ -57,3 +61,34 @@ void led_pattern_get_state(struct led_pattern_state *out);
 void led_pattern_set_state(const struct led_pattern_state *state);
 uint8_t led_pattern_get_brightness(void);
 void led_pattern_set_brightness(uint8_t brightness);
+
+/* The three values the behaviors edit, one behavior each. */
+enum led_pattern_field {
+    LED_PATTERN_FIELD_PATTERN,
+    LED_PATTERN_FIELD_BRIGHTNESS,
+    LED_PATTERN_FIELD_SPEED,
+};
+
+/* Whether the LED can be driven at all. A behavior does nothing otherwise. */
+bool led_pattern_ready(void);
+
+/* What the LED is showing now for one field: the value a step starts from. */
+int32_t led_pattern_field_value(enum led_pattern_field field);
+
+/*
+ * How every behavior asks for a value.
+ *
+ * With CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS the value becomes the setting of
+ * the transport the keyboard is on now, and reaches the LED through that
+ * setting's change event: the setting stays the one owner of the value, and a
+ * client shows the change at once. Without it, the value is applied directly.
+ */
+void led_pattern_request(enum led_pattern_field field, int32_t value);
+
+/*
+ * The settings half of led_pattern_request(), defined only when that option is
+ * on. Writes the live transport's setting in memory and schedules it to flash.
+ * Returns 0 once the value is the live setting, or a negative error, in which
+ * case the caller applies the value directly instead.
+ */
+int led_pattern_settings_store(enum led_pattern_field field, int32_t value);

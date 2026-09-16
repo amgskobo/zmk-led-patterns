@@ -1,0 +1,11 @@
+description: Set or step the brightness of the LED driven by zmk,behavior-led-pattern
+
+compatible: "zmk,behavior-led-brightness"
+
+include: one_param.yaml
+
+properties:
+  "#binding-cells":
+    type: int
+    required: true
+    const: 1

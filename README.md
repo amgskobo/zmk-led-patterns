@@ -1,14 +1,16 @@
 # ZMK LED Patterns
 
-Eighteen animated patterns for one external LED, as a ZMK behavior. On a split
+Eighteen animated patterns for one external LED, as ZMK behaviors. On a split
 keyboard it doubles as the connection indicator: the LED says whether the two
 halves have found each other before it says anything else.
 
-- one keymap behavior, `&led_pattern`, with parameter metadata so a Studio
-  keymap editor can bind it;
+- one keymap behavior per setting - `&led_pattern`, `&led_brightness` and
+  `&led_speed` - each with parameter metadata so a Studio keymap editor can
+  bind it;
 - optionally publishes the whole LED state through
   `zmk-feature-custom-settings`, so a client can edit it with no page of its
-  own;
+  own, and makes those settings the one owner of it: a key press writes the
+  setting and the LED follows;
 - no animation timer. Each pattern reports when it next changes and the redraw
   is scheduled for that moment, and nothing is scheduled at all while the
   keyboard is idle.
@@ -50,9 +52,13 @@ board or shield has to put a PWM-backed LED there:
 };
 ```
 
-with `CONFIG_ZMK_BACKLIGHT=y`.
+and a PWM driver for it (`CONFIG_PWM=y`; Zephyr then enables `LED_PWM` on its
+own for a `pwm-leds` node). The module selects `LED` itself. The chosen node is
+only how it finds the LED, so ZMK's backlight subsystem is not needed and is
+best left off: with `CONFIG_ZMK_BACKLIGHT=y`, `backlight.c` also writes that LED
+at boot and `&bl` becomes a second owner of it.
 
-### 3. Declare the behavior
+### 3. Declare the behaviors
 
 ```dts
 #include <dt-bindings/zmk/led_pattern.h>
@@ -63,55 +69,84 @@ with `CONFIG_ZMK_BACKLIGHT=y`.
             compatible = "zmk,behavior-led-pattern";
             #binding-cells = <1>;
         };
+
+        led_brightness: led_brightness {
+            compatible = "zmk,behavior-led-brightness";
+            #binding-cells = <1>;
+        };
+
+        led_speed: led_speed {
+            compatible = "zmk,behavior-led-speed";
+            #binding-cells = <1>;
+        };
     };
 };
 ```
 
-The node may be called anything: no setting key is derived from its name, so
-renaming it later does not orphan stored values.
+The `led_pattern` node is required: it owns the LED controller the other two
+drive, and the build fails with a message if one of them is declared without
+it. The brightness and speed nodes are optional. The nodes may be called
+anything: no setting key is derived from their names, so renaming one later
+does not orphan stored values. Declare no more than one node of each compatible;
+the build rejects duplicates instead of silently registering only the first.
 
 ### Options
 
 | symbol | default | |
 | --- | --- | --- |
-| `CONFIG_ZMK_LED_PATTERNS` | on when a `zmk,behavior-led-pattern` node exists | the behavior and the animation. Depends on `ZMK_BACKLIGHT`. |
-| `CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS` | `n` | publish the state for a client to edit. Needs `ZMK_CUSTOM_SETTINGS_STUDIO_RPC`. |
+| `CONFIG_ZMK_LED_PATTERNS` | on when a `zmk,behavior-led-pattern` node exists | the behaviors and the animation. Selects `LED`. |
+| `CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS` | `n` | publish the state for a client to edit, and have key presses write it. Needs `ZMK_CUSTOM_SETTINGS_STUDIO_RPC`. |
 
-The module selects `ZMK_LOW_PRIORITY_WORK_QUEUE`, and `ZMK_SPLIT_RELAY_EVENT`
-on a split build.
+The module selects `LED` and `ZMK_LOW_PRIORITY_WORK_QUEUE`, and
+`ZMK_SPLIT_RELAY_EVENT` on a split build.
 
-## The behavior
+## The behaviors
 
-One number carries three kinds of command, told apart by which band it falls
-in:
+One behavior per setting, each taking one parameter:
 
-| band | meaning |
-| --- | --- |
-| 0 - 17 | select this exact pattern |
-| 100 - 103 | `LED_PATTERN_PREVIOUS`, `_NEXT`, `_BRIGHTNESS_UP`, `_BRIGHTNESS_DOWN` |
-| 410 - 800 | `LED_PATTERN_SPEED(pct)`, a percentage from 10 to 400 |
+| behavior | parameter | |
+| --- | --- | --- |
+| `&led_pattern` | 0 - 17 | select this exact pattern |
+| | `LED_PATTERN_PREVIOUS`, `LED_PATTERN_NEXT` | step to the previous or next pattern, wrapping around |
+| `&led_brightness` | 0 - 100 | set this brightness percentage |
+| | `LED_BRIGHTNESS_DOWN`, `LED_BRIGHTNESS_UP` | ten points down or up, between 0 and 100 |
+| `&led_speed` | 10 - 400 | set this speed percentage |
+| | `LED_SPEED_DOWN`, `LED_SPEED_UP` | ten points down or up, between 10 and 400 |
+| | `LED_SPEED_MIN`, `LED_SPEED_DEFAULT`, `LED_SPEED_MAX` | 10, 100 or 400 percent |
 
 ```dts
 &led_pattern LED_PATTERN_HEARTBEAT
 &led_pattern LED_PATTERN_NEXT
-&led_pattern LED_PATTERN_BRIGHTNESS_DOWN
-&led_pattern LED_PATTERN_SPEED(200)
+&led_brightness LED_BRIGHTNESS_DOWN
+&led_brightness 40
+&led_speed 200
+&led_speed LED_SPEED_UP
+&led_speed LED_SPEED_DEFAULT
 ```
 
-Brightness steps in tens with `_BRIGHTNESS_UP` and `_BRIGHTNESS_DOWN`; there is
-no absolute-brightness band in the keymap parameter. Absolute brightness is
-reachable from the settings below, and is what the split mirror carries.
+A step lands on a multiple of ten, so a brightness of 95 set from a client steps
+to 100 or 90 rather than carrying the 5 along, and a speed step does the same
+between its bounds.
 
-The absolute speed band exists because a split central has to be able to tell a
-peripheral what the state now *is* rather than how it changed: "next pattern"
-keeps two halves together only for as long as both started from the same place.
-It is an ordinary keymap parameter too.
+Brightness 0 is the LED's low-power state rather than a dim one, and a step down
+reaches it. The LED is written to zero once, which lets the PWM peripheral stop,
+and no redraw is scheduled at all until the brightness rises again; the pattern
+then picks up at the point its clock has reached. The split connection indicator
+is the one thing that still lights at zero, because it is a diagnostic and has to
+look the same whatever the LED is set to. The advertising indicator is scaled by
+the brightness like the patterns, so it goes dark too.
 
 Speed is a percentage of the rate each pattern was drawn at. It applies to the
 animation clock rather than to the patterns, so one setting speeds all eighteen
 up by the same factor and cannot get a single one of them wrong.
 
-The behavior publishes ZMK parameter metadata, which is what makes it
+With `CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS=y` a binding does not touch the
+LED directly: it writes the setting its behavior is named after, for the
+transport the keyboard is on now, and the LED follows that setting - see
+[Studio settings](#studio-settings). Without the option, a binding applies its
+value to the LED directly.
+
+Each behavior publishes ZMK parameter metadata, which is what makes it
 selectable in a Studio keymap editor. A behavior that publishes none is treated
 as one that takes no parameter at all, and every binding whose parameter is
 non-zero is rejected as invalid.
@@ -175,10 +210,14 @@ the first eight and losing the other ten. The complete names live where they
 fit - in the parameter metadata a keymap editor draws, and in the public
 header.
 
-Keymap bindings keep working with this on. The settings are the owner of the
-value: a press changes the LED there and then, and the next settings event puts
-the stored set back. Nothing is written back from a key press, because a value
-with two owners is how the two views come to disagree.
+**Key presses write these settings.** The settings are the one owner of the
+value. A press writes the setting its behavior is named after, for the live
+transport, and the LED follows through the same change event a client's edit
+raises, so a client shows the press as it happens and switching transports or
+editing another value cannot undo it. The write is in memory at once and saved
+to flash three seconds after the last press: a PERSIST write goes to flash with
+no debounce of its own, so a run of presses would otherwise be one flash write
+per press rather than one per setting.
 
 Only the central registers these. A peripheral needs none of its own: whatever
 reaches the central, a key press or an edit made in a client, is mirrored to it
@@ -204,7 +243,7 @@ actually agreed:
 | linked | steady, the shape of pattern 0 | the link is up, state not yet agreed |
 | synced | the normal pattern, default breathe (1) | the peripheral has confirmed what it is showing |
 
-Three seconds after the link comes up - long enough for the central to have
+Five seconds after the link comes up - long enough for the central to have
 discovered the peripheral's relay characteristic, because a write before that
 is dropped by the transport with nothing but a log line - the central sends a
 `led` packet carrying the whole state: pattern, brightness, speed, the
@@ -214,19 +253,19 @@ picks the animation up in phase instead of restarting it.
 The peripheral answers with a `lea` packet naming the pattern it is now
 showing. That acknowledgement is what makes "synced" an observed fact rather
 than an assumption, and it is what releases the indicator on both halves. The
-connect-time send retries at most four times over two seconds waiting for it
-and then gives up, leaving the LED on steady - which is the readable difference
-between a pair that never linked and a pair that linked but never agreed. Relay
-event names are capped at four bytes including the NUL, which is why both are
-three characters.
+connect-time send is made at most five times, half a second apart, waiting for
+it and then gives up, leaving the LED on steady - which is the readable
+difference between a pair that never linked and a pair that linked but never
+agreed. Relay event names are capped at four bytes including the NUL, which is
+why both are three characters.
 
 State changes after that send one packet each, coalesced over 20 ms so a
 settings apply or a dragged slider is one radio event rather than a stream.
 
-The behavior is `BEHAVIOR_LOCALITY_CENTRAL`: the central owns the state and
-mirrors the result, rather than the peripheral invoking the behavior a second
-time of its own. Include the module and the same behavior node in both firmware
-images.
+The behaviors are `BEHAVIOR_LOCALITY_CENTRAL`: the central owns the state and
+mirrors the result, rather than the peripheral invoking a behavior a second
+time of its own. Include the module and the same behavior nodes in both
+firmware images.
 
 ### The host link
 
@@ -283,3 +322,18 @@ animation has no business queuing in front of the item that makes a keyboard
 findable again after a host disconnect; separately, Zephyr refuses to block for
 an ATT TX buffer when the caller is that queue, so a split write posted from it
 fails whenever the buffer pool is momentarily empty.
+
+## Compatibility and tests
+
+The base behaviors build against upstream ZMK `main`. The optional Studio
+settings integration additionally needs `cormoran/zmk` `main+dya` and
+`zmk-feature-custom-settings`; leaving the option off removes that dependency.
+
+CI builds a real nRF52840 ZMK firmware fixture in both configurations. It checks
+that all three behaviors are linked, that the DYA setting namespace and keys
+are present only in the DYA build, and that `CONFIG_ZMK_BACKLIGHT` stays off so
+there is only one owner of the PWM LED.
+
+## License
+
+[MIT](LICENSE)

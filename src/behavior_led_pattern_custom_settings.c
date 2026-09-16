@@ -1,36 +1,39 @@
 /*
  * SPDX-License-Identifier: MIT
  *
- * Publishes the LED state through zmk-feature-custom-settings.
+ * Publishes the LED state through zmk-feature-custom-settings, and makes those
+ * settings the one owner of it.
  *
  * Register a subsystem to own the namespace, register the values, listen for
- * the two settings events, and apply. Nothing else: no work item, no poll, no
- * gating on a flag of its own, and no private split relay. Every one of those
- * was tried and every one of them broke something -- a keyboard that would not
- * boot, and then an edit in a client that silently did nothing.
+ * the settings events, and apply. The one work item is the delayed flash write
+ * at the bottom, defined at compile time: an item initialised from an init can
+ * be submitted before it exists, and that has already cost this module a
+ * keyboard that would not boot.
  *
- * Only what ZMK has no equivalent of is registered here. Brightness and on/off
- * are not: those are `&bl`, ZMK's own backlight behavior, which already saves
- * its value, relays it to both split halves and draws itself properly in a
- * keymap editor. What is left is the shape of the animation and how fast it
- * runs, one pair per transport, because the two hosts are not looked at under
- * the same conditions. The live pair follows zmk_endpoint_changed, so
- * unplugging USB changes the light rather than changing nothing.
+ * The pattern, its brightness, its speed and the idle-off switch are
+ * registered as one set per transport, because the two hosts are not looked at
+ * under the same conditions, plus the one shared advertising indicator.
+ * Brightness is here rather than left to `&bl` because this module owns the
+ * LED and does not use ZMK's backlight subsystem. The live set follows
+ * zmk_endpoint_changed, so unplugging USB changes the light rather than
+ * changing nothing.
  *
- * The split halves are ZMK's business, not this file's. A keymap press is
- * relayed by BEHAVIOR_LOCALITY_GLOBAL, which is ZMK's own mechanism and needs
- * no code here. To have a client's edit reach the peripheral as well, the
- * supported route is custom-settings' own relay:
- * CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY on both halves, with the
- * peripheral registering these same settings. That is deliberately not turned
- * on yet -- it is a real change to the peripheral's firmware -- but it is the
- * official one, and it replaces rather than joins anything here.
+ * A keymap binding writes the live transport's setting rather than the LED --
+ * led_pattern_settings_store() below -- and the value reaches the LED through
+ * the same change event a client's edit raises. The two cannot disagree, and a
+ * client shows a key press as it happens.
+ *
+ * The split halves are not this file's business. The behaviors run on the
+ * central, and the controller mirrors whatever the central ends up showing to
+ * the peripheral as final state, so a peripheral registers none of these.
  */
 
 #define DT_DRV_COMPAT zmk_behavior_led_pattern
 
 #include <zephyr/devicetree.h>
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #include <cormoran/zmk/custom_settings.h>
@@ -38,6 +41,7 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/endpoint_changed.h>
 #include <zmk/studio/custom.h>
+#include <zmk/workqueue.h>
 
 #include <zmk-led-patterns/custom_settings.h>
 #include <zmk-led-patterns/led_pattern.h>
@@ -293,3 +297,114 @@ ZMK_LISTENER(led_pattern_custom_settings, led_pattern_settings_event_cb);
 ZMK_SUBSCRIPTION(led_pattern_custom_settings, zmk_custom_setting_changed);
 ZMK_SUBSCRIPTION(led_pattern_custom_settings, zmk_custom_settings_initialized);
 ZMK_SUBSCRIPTION(led_pattern_custom_settings, zmk_endpoint_changed);
+
+/* ===== Keymap bindings write the live setting ===== */
+
+/*
+ * How long the keys have to be quiet before a changed value goes to flash.
+ *
+ * A PERSIST write goes straight to settings_save_one() with no debounce of its
+ * own, so writing it on every press would be one flash write per press. In
+ * memory first and flash once the run is over is one per setting, and the
+ * dirty mark a client shows in between clears itself when the save lands.
+ */
+#define LED_PATTERN_PERSIST_DELAY_MS 3000
+
+static const struct transport_settings *const transports[] = {&usb_transport, &ble_transport};
+
+/* Per transport, the fields a key press has changed in memory and not saved.
+ * Set on the thread the press arrives on, cleared on the low-priority queue. */
+static atomic_t unsaved[ARRAY_SIZE(transports)];
+
+/* A key press and the delayed saver can run on different threads. Keep the
+ * memory write, dirty mark and later read/persist operation indivisible with
+ * respect to each other, or the saver can write an older value back over a
+ * newer press. Client writes use PERSIST themselves and do not enter this
+ * path. */
+K_MUTEX_DEFINE(persist_mutex);
+
+static const struct zmk_custom_setting *field_setting(const struct transport_settings *transport,
+                                                      enum led_pattern_field field) {
+    switch (field) {
+    case LED_PATTERN_FIELD_PATTERN:
+        return transport->pattern;
+    case LED_PATTERN_FIELD_BRIGHTNESS:
+        return transport->brightness;
+    case LED_PATTERN_FIELD_SPEED:
+        return transport->speed;
+    default:
+        return NULL;
+    }
+}
+
+static void persist_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(persist_work, persist_work_handler);
+
+static void persist_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    bool retry = false;
+
+    for (size_t t = 0; t < ARRAY_SIZE(transports); t++) {
+        for (int field = LED_PATTERN_FIELD_PATTERN; field <= LED_PATTERN_FIELD_SPEED; field++) {
+            if (!atomic_test_bit(&unsaved[t], field)) {
+                continue;
+            }
+
+            const struct zmk_custom_setting *setting = field_setting(transports[t], field);
+            struct zmk_custom_setting_value value;
+
+            /* Serialize with the memory write and clear the dirty bit only
+             * after flash accepted the value. A transient storage failure must
+             * not silently turn a live setting into a value lost at reboot. */
+            k_mutex_lock(&persist_mutex, K_FOREVER);
+            int ret = zmk_custom_setting_read(setting, &value);
+            if (ret == 0) {
+                ret = zmk_custom_setting_write(setting, &value,
+                                               ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+            }
+            if (ret == 0) {
+                atomic_clear_bit(&unsaved[t], field);
+            } else {
+                retry = true;
+                LOG_WRN("led: saving \"%s\" failed (%d)", setting->key, ret);
+            }
+            k_mutex_unlock(&persist_mutex);
+        }
+    }
+
+    if (retry) {
+        k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &persist_work,
+                                    K_MSEC(LED_PATTERN_PERSIST_DELAY_MS));
+    }
+}
+
+/*
+ * The write is in memory and synchronous, so the change event has already put
+ * the value on the LED by the time the next press is decoded, and a step from
+ * there starts from it. Flash is the slow part and goes to the low-priority
+ * queue, after the keys have been quiet.
+ */
+int led_pattern_settings_store(enum led_pattern_field field, int32_t value) {
+    const struct transport_settings *live = active_transport();
+    const struct zmk_custom_setting *setting = field_setting(live, field);
+
+    if (setting == NULL) {
+        return -EINVAL;
+    }
+
+    const struct zmk_custom_setting_value new_value = ZMK_CUSTOM_SETTING_VALUE_INT32(value);
+    k_mutex_lock(&persist_mutex, K_FOREVER);
+    int ret = zmk_custom_setting_write(setting, &new_value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != 0) {
+        k_mutex_unlock(&persist_mutex);
+        LOG_WRN("led: writing %d to \"%s\" failed (%d)", value, setting->key, ret);
+        return ret;
+    }
+
+    atomic_set_bit(&unsaved[live == &usb_transport ? 0 : 1], field);
+    k_mutex_unlock(&persist_mutex);
+    k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &persist_work,
+                                K_MSEC(LED_PATTERN_PERSIST_DELAY_MS));
+    return 0;
+}
