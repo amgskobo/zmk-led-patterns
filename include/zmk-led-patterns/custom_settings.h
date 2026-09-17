@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2025-2026 amgskobo
  * SPDX-License-Identifier: MIT
  *
  * The custom-settings namespace this module publishes under.

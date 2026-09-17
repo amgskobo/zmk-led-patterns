@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2025-2026 amgskobo
  * SPDX-License-Identifier: MIT
  *
  * The whole of what this module controls, as one struct.

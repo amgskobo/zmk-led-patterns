@@ -1,4 +1,9 @@
-/* Reusable external LED pattern controller. */
+/*
+ * Copyright (c) 2025-2026 amgskobo
+ * SPDX-License-Identifier: MIT
+ *
+ * Reusable external LED pattern controller.
+ */
 
 #define DT_DRV_COMPAT zmk_behavior_led_pattern
 

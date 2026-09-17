@@ -1,3 +1,6 @@
+# Copyright (c) 2025-2026 amgskobo
+# SPDX-License-Identifier: MIT
+
 if(CONFIG_ZMK_LED_PATTERNS)
   zephyr_include_directories(include)
   # One behavior per setting. Each file compiles to nothing when its node is
