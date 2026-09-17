@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2025-2026 amgskobo
  * SPDX-License-Identifier: MIT
  *
  * Publishes the LED state through zmk-feature-custom-settings, and makes those

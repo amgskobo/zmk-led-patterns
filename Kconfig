@@ -1,3 +1,4 @@
+# Copyright (c) 2025-2026 amgskobo
 # SPDX-License-Identifier: MIT
 
 DT_COMPAT_ZMK_BEHAVIOR_LED_PATTERN := zmk,behavior-led-pattern

@@ -1,3 +1,6 @@
+# Copyright (c) 2025-2026 amgskobo
+# SPDX-License-Identifier: MIT
+
 description: Set or step the brightness of the LED driven by zmk,behavior-led-pattern
 
 compatible: "zmk,behavior-led-brightness"

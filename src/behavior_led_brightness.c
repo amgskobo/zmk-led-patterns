@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2025-2026 amgskobo
  * SPDX-License-Identifier: MIT
  *
  * &led_brightness: the brightness setting, as a behavior of its own.

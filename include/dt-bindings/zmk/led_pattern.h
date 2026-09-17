@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2025-2026 amgskobo
  * SPDX-License-Identifier: MIT
  *
  * The parameters of the three LED behaviors, one setting each.
