@@ -61,4 +61,25 @@ config ZMK_LED_PATTERNS_CUSTOM_SETTINGS
       what an upstream ZMK build gets, none of it is compiled and the keymap
       bindings are the whole interface.
 
+config ZMK_LED_PATTERNS_PM_INIT_PRIORITY
+    int "Init priority of the power-off device before the PWM driver"
+    default 45
+    depends on PM_DEVICE
+    help
+      POST_KERNEL priority of a small device that writes the LED dark and
+      stops its animation when the keyboard powers off through &soft_off,
+      which suspends devices in init order. It has to come before the LED's
+      PWM driver (PWM_INIT_PRIORITY), so that the driver still works when the
+      LED is written. A pin keeps its level while the SoC is off, so without
+      this an LED lit at that moment stays lit.
+
+config ZMK_LED_PATTERNS_PM_LATE_INIT_PRIORITY
+    int "Init priority of the power-off device after the LED device"
+    default 95
+    depends on PM_DEVICE
+    help
+      The same for ZMK's idle sleep, which suspends devices in the reverse of
+      init order, so this one has to come after the LED device
+      (LED_INIT_PRIORITY).
+
 endif # ZMK_LED_PATTERNS

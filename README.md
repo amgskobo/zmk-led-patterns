@@ -1,5 +1,9 @@
 # ZMK LED Patterns
 
+[![Test](https://github.com/amgskobo/zmk-led-patterns/actions/workflows/test.yml/badge.svg)](https://github.com/amgskobo/zmk-led-patterns/actions/workflows/test.yml)
+
+[日本語](README_JA.md)
+
 Eighteen animated patterns for one external LED, as ZMK behaviors. On a split
 keyboard it doubles as the connection indicator: the LED says whether the two
 halves have found each other before it says anything else.
@@ -135,6 +139,19 @@ then picks up at the point its clock has reached. The split connection indicator
 is the one thing that still lights at zero, because it is a diagnostic and has to
 look the same whatever the LED is set to. The advertising indicator is scaled by
 the brightness like the patterns, so it goes dark too.
+
+A power-off writes the LED dark as well. ZMK's `&soft_off` and its idle sleep
+raise no event, and a pin keeps its level for as long as the SoC is off: an LED
+lit at that moment stayed lit through soft-off - and, through a transistor, a
+gate left charged by a released pin does the same. With `CONFIG_PM_DEVICE` (soft
+off selects it) the module registers two small power-management devices, one
+before the PWM driver and one after the LED device in init order, because the
+two power-off paths suspend in opposite orders. Whichever runs first stops the
+animation and the split mirror and writes zero while the LED drivers still
+work; the other finds that done. A resume, if the power-off is abandoned,
+redraws where the pattern had got to. Their priorities are
+`CONFIG_ZMK_LED_PATTERNS_PM_INIT_PRIORITY` (45) and
+`CONFIG_ZMK_LED_PATTERNS_PM_LATE_INIT_PRIORITY` (95).
 
 Speed is a percentage of the rate each pattern was drawn at. It applies to the
 animation clock rather than to the patterns, so one setting speeds all eighteen

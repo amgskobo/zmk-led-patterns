@@ -12,6 +12,8 @@
 #include <zephyr/drivers/led.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #include <drivers/behavior.h>
@@ -106,6 +108,11 @@ static bool animation_suspended;
  * decision can change independently -- an idle timeout, and a setting edited
  * while the keyboard is already idle. */
 static enum zmk_activity_state activity_state = ZMK_ACTIVITY_ACTIVE;
+/* Set while the keyboard powers off (the power-management suspend at the end
+ * of this file) and cleared if that power-off is abandoned. Nothing is drawn
+ * or mirrored while it is set: the LED has been written dark, and a later
+ * write would be latched into the pin for as long as the SoC stays off. */
+static atomic_t powering_off;
 
 /*
  * Everything this module schedules runs on ZMK's low-priority queue.
@@ -354,7 +361,7 @@ static struct bt_conn_cb split_conn_callbacks = {
 static void mirror_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
 
-    if (!peripheral_link_up) {
+    if (!peripheral_link_up || atomic_get(&powering_off)) {
         return;
     }
 
@@ -835,6 +842,10 @@ static uint32_t hold_to_wall_ms(uint32_t hold_ms) {
 static void pattern_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
 
+    if (atomic_get(&powering_off)) {
+        return;
+    }
+
     if (animation_suspended) {
         write_led(0);
         return;
@@ -922,7 +933,7 @@ static void refresh_pattern_output(void) {
      * settings_load() runs on the main thread and the settings listener that
      * applies a value is free to fire first. Dropping the redraw is right --
      * init redraws anyway -- while touching an uninitialised k_work is not. */
-    if (!controller_ready) {
+    if (!controller_ready || atomic_get(&powering_off)) {
         return;
     }
 
@@ -1283,3 +1294,73 @@ static int behavior_led_pattern_init(const struct device *dev) {
 
 BEHAVIOR_DT_INST_DEFINE(0, behavior_led_pattern_init, NULL, NULL, NULL, POST_KERNEL,
                         CONFIG_APPLICATION_INIT_PRIORITY, &behavior_led_pattern_driver_api);
+
+#if IS_ENABLED(CONFIG_PM_DEVICE)
+
+#if defined(CONFIG_PWM_INIT_PRIORITY)
+BUILD_ASSERT(CONFIG_ZMK_LED_PATTERNS_PM_INIT_PRIORITY < CONFIG_PWM_INIT_PRIORITY,
+             "the first power-off device must come before the PWM driver in init order");
+#endif
+BUILD_ASSERT(CONFIG_ZMK_LED_PATTERNS_PM_LATE_INIT_PRIORITY > CONFIG_LED_INIT_PRIORITY,
+             "the second power-off device must come after the LED device in init order");
+
+/*
+ * The LED through a power-off.
+ *
+ * ZMK powers off along two paths and neither raises an event: &soft_off
+ * suspends every device in init order, idle sleep suspends them in the
+ * reverse order. A pin keeps its level for as long as the SoC is off, and the
+ * LED drivers' own suspend only lets go of the pin: an LED lit at that moment
+ * stayed lit through soft-off, on both halves of a split. So the LED is
+ * written dark here, while its drivers still work, and nothing is drawn or
+ * mirrored until a resume says the power-off was abandoned. Two devices sit
+ * either side of those drivers in init order, so on either path one of them
+ * runs first; the other finds the work stopped and the LED already dark.
+ */
+static int led_pattern_pm_action(const struct device *dev, enum pm_device_action action) {
+    ARG_UNUSED(dev);
+
+    switch (action) {
+    case PM_DEVICE_ACTION_SUSPEND: {
+        struct k_work_sync sync;
+
+        if (atomic_set(&powering_off, 1) != 0) {
+            return 0;
+        }
+        k_work_cancel_delayable_sync(&pattern_work, &sync);
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+        k_work_cancel_delayable_sync(&mirror_work, &sync);
+#endif
+        /* Driven to zero rather than released: a pin let go while high
+         * leaves a transistor's gate charged, and the LED behind it lit. */
+        write_led(0);
+        return 0;
+    }
+    case PM_DEVICE_ACTION_RESUME:
+        if (atomic_clear(&powering_off) != 0) {
+            refresh_pattern_output();
+        }
+        return 0;
+    default:
+        return -ENOTSUP;
+    }
+}
+
+static int led_pattern_pm_init(const struct device *dev) {
+    ARG_UNUSED(dev);
+    return 0;
+}
+
+PM_DEVICE_DEFINE(led_pattern_pm, led_pattern_pm_action);
+
+DEVICE_DEFINE(led_pattern_pm, "led_pattern_pm", led_pattern_pm_init,
+              PM_DEVICE_GET(led_pattern_pm), NULL, NULL, POST_KERNEL,
+              CONFIG_ZMK_LED_PATTERNS_PM_INIT_PRIORITY, NULL);
+
+PM_DEVICE_DEFINE(led_pattern_pm_late, led_pattern_pm_action);
+
+DEVICE_DEFINE(led_pattern_pm_late, "led_pattern_pm_late", led_pattern_pm_init,
+              PM_DEVICE_GET(led_pattern_pm_late), NULL, NULL, POST_KERNEL,
+              CONFIG_ZMK_LED_PATTERNS_PM_LATE_INIT_PRIORITY, NULL);
+
+#endif /* IS_ENABLED(CONFIG_PM_DEVICE) */

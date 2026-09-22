@@ -50,6 +50,11 @@ strings "$work_dir/build/zephyr/zmk.elf" >"$work_dir/build/zephyr/strings.txt"
 grep -Fxq led_pattern "$work_dir/build/zephyr/strings.txt"
 grep -Fxq led_brightness "$work_dir/build/zephyr/strings.txt"
 grep -Fxq led_speed "$work_dir/build/zephyr/strings.txt"
+# The fixture turns device power management on, so both power-off devices
+# that write the LED dark before the SoC goes off are built.
+grep -q '^CONFIG_PM_DEVICE=y' "$work_dir/build/zephyr/.config"
+grep -Fxq led_pattern_pm "$work_dir/build/zephyr/strings.txt"
+grep -Fxq led_pattern_pm_late "$work_dir/build/zephyr/strings.txt"
 
 if [ "$variant" = upstream ]; then
     if grep -q '^CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS=y' "$work_dir/build/zephyr/.config"; then
