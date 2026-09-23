@@ -324,7 +324,7 @@ pool が一時的に空になるたびに失敗します。
 無効にすればその依存はなくなります。
 
 CI は両方の構成で nRF52840 向けの実際の ZMK ファームウェア fixture をビルドします。
-3 つの behavior がすべてリンクされていること、DYA の設定 namespace とキーが DYA ビルドに
+3 つの behavior がすべてリンクされていること、DYA の設定 namespace と 9 個すべてのキーが DYA ビルドに
 だけ含まれること、PWM LED の所有者が 1 つになるよう `CONFIG_ZMK_BACKLIGHT` が無効の
 ままであることを確認します。
 

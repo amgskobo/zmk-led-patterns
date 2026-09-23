@@ -64,8 +64,14 @@ if [ "$variant" = upstream ]; then
 else
     grep -q '^CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS=y' "$work_dir/build/zephyr/.config"
     grep -Fxq amgskobo__led "$work_dir/build/zephyr/strings.txt"
-    grep -Fxq led.usb_pattern "$work_dir/build/zephyr/strings.txt"
-    grep -Fxq led.ble_brightness "$work_dir/build/zephyr/strings.txt"
+    for transport in usb ble; do
+        for field in pattern speed brightness idle_off; do
+            grep -Fxq "led.${transport}_${field}" "$work_dir/build/zephyr/strings.txt" || {
+                echo "missing Studio setting: led.${transport}_${field}" >&2
+                exit 1
+            }
+        done
+    done
     grep -Fxq led.adv_blink "$work_dir/build/zephyr/strings.txt"
 fi
 

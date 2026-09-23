@@ -348,7 +348,7 @@ settings integration additionally needs `cormoran/zmk` `main+dya` and
 `zmk-feature-custom-settings`; leaving the option off removes that dependency.
 
 CI builds a real nRF52840 ZMK firmware fixture in both configurations. It checks
-that all three behaviors are linked, that the DYA setting namespace and keys
+that all three behaviors are linked, that the DYA setting namespace and all nine keys
 are present only in the DYA build, and that `CONFIG_ZMK_BACKLIGHT` stays off so
 there is only one owner of the PWM LED.
 
