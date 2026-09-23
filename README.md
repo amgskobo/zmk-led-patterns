@@ -357,7 +357,10 @@ there is only one owner of the PWM LED.
 The host regression suite runs with optimized compilation and ASan/UBSan via
 `bash ./tests/run-host-docker.sh`. It covers burst coalescing (latest value per
 setting), independent fields, updates during a write, retry after a failed
-write, value overlay, and USB port-open decisions. The USB mitigation applies
+write, value overlay, and USB port-open decisions. A deterministic 100,000-step
+interleaving simulation also exercises rapid edits and failed writes; CI requires
+100% line and branch coverage of the small `usb_pending.h` helper. This does not
+measure the whole Zephyr module. The USB mitigation applies
 to this module's LED-originated setting notifications. It does not change the
 shared DYA RPC transmitter or guarantee that unrelated Studio producers cannot
 block if its transmit buffer fills.

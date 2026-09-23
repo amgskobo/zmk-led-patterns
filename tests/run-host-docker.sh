@@ -16,4 +16,14 @@ docker run --rm --volume "$repo_root:/src:ro" "$image" /bin/bash -lc '
             /src/tests/test_usb_pending.c -o /tmp/test_usb_pending
         ASAN_OPTIONS=detect_leaks=0 /tmp/test_usb_pending
     done
+    cc "${warnings[@]}" -O0 --coverage -I/src/src -I/src/include \
+        /src/tests/test_usb_pending.c -o /tmp/test_usb_pending_cov
+    /tmp/test_usb_pending_cov
+    cd /tmp
+    coverage=$(gcov -b -c -o /tmp/test_usb_pending_cov-test_usb_pending.gcno \
+        /src/tests/test_usb_pending.c)
+    printf "%s\n" "$coverage"
+    helper=$(printf "%s\n" "$coverage" | grep -F -A4 "/src/src/usb_pending.h")
+    printf "%s\n" "$helper" | grep -Fq "Lines executed:100.00%"
+    printf "%s\n" "$helper" | grep -Fq "Taken at least once:100.00%"
 '
