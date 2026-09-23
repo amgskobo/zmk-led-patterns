@@ -48,6 +48,7 @@
 
 #include <zmk-led-patterns/custom_settings.h>
 #include <zmk-led-patterns/led_pattern.h>
+#include "usb_pending.h"
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -202,21 +203,11 @@ static const struct transport_settings *active_transport(void) {
  * lock protects only these small snapshots, never an RPC or a flash write. */
 #define LED_PATTERN_USB_COALESCE_MS 300
 K_MUTEX_DEFINE(usb_pending_mutex);
-static int32_t usb_pending_value[3];
-static uint32_t usb_pending_version[3];
-static uint8_t usb_pending_mask;
+static struct led_pattern_usb_pending usb_pending;
 
 static void usb_pending_overlay(struct led_pattern_state *state, uint8_t *brightness) {
     k_mutex_lock(&usb_pending_mutex, K_FOREVER);
-    if (usb_pending_mask & BIT(LED_PATTERN_FIELD_PATTERN)) {
-        state->pattern = (uint8_t)usb_pending_value[LED_PATTERN_FIELD_PATTERN];
-    }
-    if (usb_pending_mask & BIT(LED_PATTERN_FIELD_BRIGHTNESS)) {
-        *brightness = (uint8_t)usb_pending_value[LED_PATTERN_FIELD_BRIGHTNESS];
-    }
-    if (usb_pending_mask & BIT(LED_PATTERN_FIELD_SPEED)) {
-        state->speed = (uint16_t)usb_pending_value[LED_PATTERN_FIELD_SPEED];
-    }
+    led_pattern_usb_pending_overlay(&usb_pending, state, brightness);
     k_mutex_unlock(&usb_pending_mutex);
 }
 
@@ -371,8 +362,10 @@ static bool usb_studio_port_closed(void) {
     if (zmk_endpoint_get_selected().transport == ZMK_TRANSPORT_USB) {
         const struct device *uart = DEVICE_DT_GET(DT_CHOSEN(zmk_studio_rpc_uart));
         uint32_t dtr = 0;
-        return !device_is_ready(uart) ||
-               uart_line_ctrl_get(uart, UART_LINE_CTRL_DTR, &dtr) != 0 || dtr == 0;
+        const bool ready = device_is_ready(uart);
+        const bool dtr_read_succeeded =
+            ready && uart_line_ctrl_get(uart, UART_LINE_CTRL_DTR, &dtr) == 0;
+        return led_pattern_usb_port_closed(true, ready, dtr_read_succeeded, dtr);
     }
 #endif
     return false;
@@ -418,9 +411,9 @@ static void usb_coalesce_work_handler(struct k_work *work) {
 
     for (int field = LED_PATTERN_FIELD_PATTERN; field <= LED_PATTERN_FIELD_SPEED; field++) {
         k_mutex_lock(&usb_pending_mutex, K_FOREVER);
-        const bool pending = (usb_pending_mask & BIT(field)) != 0;
-        const int32_t value = usb_pending_value[field];
-        const uint32_t version = usb_pending_version[field];
+        int32_t value = 0;
+        uint32_t version = 0;
+        const bool pending = led_pattern_usb_pending_peek(&usb_pending, field, &value, &version);
         k_mutex_unlock(&usb_pending_mutex);
         if (!pending) {
             continue;
@@ -438,9 +431,7 @@ static void usb_coalesce_work_handler(struct k_work *work) {
         k_mutex_unlock(&persist_mutex);
 
         k_mutex_lock(&usb_pending_mutex, K_FOREVER);
-        if (ret == 0 && usb_pending_version[field] == version) {
-            usb_pending_mask &= (uint8_t)~BIT(field);
-        } else {
+        if (led_pattern_usb_pending_finish(&usb_pending, field, version, ret == 0)) {
             retry = true;
         }
         k_mutex_unlock(&usb_pending_mutex);
@@ -509,9 +500,7 @@ int led_pattern_settings_store(enum led_pattern_field field, int32_t value) {
 
     if (live == &usb_transport) {
         k_mutex_lock(&usb_pending_mutex, K_FOREVER);
-        usb_pending_value[field] = value;
-        usb_pending_version[field]++;
-        usb_pending_mask |= (uint8_t)BIT(field);
+        led_pattern_usb_pending_put(&usb_pending, field, value);
         k_mutex_unlock(&usb_pending_mutex);
         k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &usb_coalesce_work,
                                     K_MSEC(LED_PATTERN_USB_COALESCE_MS));

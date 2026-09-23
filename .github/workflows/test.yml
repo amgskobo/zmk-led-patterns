@@ -18,6 +18,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Exercise USB coalescing and closed-port decisions
+        run: bash ./tests/run-host-docker.sh
   firmware:
     runs-on: ubuntu-latest
     timeout-minutes: 45
