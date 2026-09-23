@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: MIT
  *
  * Publishes the LED state through zmk-feature-custom-settings, and makes those
- * settings the one owner of it.
+ * settings the persistent owner of it.
  *
  * Register a subsystem to own the namespace, register the values, listen for
- * the settings events, and apply. The one work item is the delayed flash write
- * at the bottom, defined at compile time: an item initialised from an init can
- * be submitted before it exists, and that has already cost this module a
- * keyboard that would not boot.
+ * the settings events, and apply. The deferred USB write and flash-save work
+ * items are defined at compile time: an item initialised from an init can be
+ * submitted before it exists, and that has already cost this module a keyboard
+ * that would not boot.
  *
  * The pattern, its brightness, its speed and the idle-off switch are
  * registered as one set per transport, because the two hosts are not looked at
@@ -19,10 +19,10 @@
  * zmk_endpoint_changed, so unplugging USB changes the light rather than
  * changing nothing.
  *
- * A keymap binding writes the live transport's setting rather than the LED --
- * led_pattern_settings_store() below -- and the value reaches the LED through
- * the same change event a client's edit raises. The two cannot disagree, and a
- * client shows a key press as it happens.
+ * A BLE keymap binding writes the live setting immediately. USB key presses
+ * apply to the LED immediately but coalesce their setting writes: a burst of
+ * Studio notifications can otherwise fill the USB transport and stall input.
+ * The final value reaches Studio after the short quiet interval below.
  *
  * The split halves are not this file's business. The behaviors run on the
  * central, and the controller mirrors whatever the central ends up showing to
@@ -32,6 +32,8 @@
 #define DT_DRV_COMPAT zmk_behavior_led_pattern
 
 #include <zephyr/devicetree.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
@@ -195,6 +197,29 @@ static const struct transport_settings *active_transport(void) {
     return &ble_transport;
 }
 
+/* USB key repeats can outpace Studio's notification transport. Keep only the
+ * latest value per field until the keys have been quiet for a moment. This
+ * lock protects only these small snapshots, never an RPC or a flash write. */
+#define LED_PATTERN_USB_COALESCE_MS 300
+K_MUTEX_DEFINE(usb_pending_mutex);
+static int32_t usb_pending_value[3];
+static uint32_t usb_pending_version[3];
+static uint8_t usb_pending_mask;
+
+static void usb_pending_overlay(struct led_pattern_state *state, uint8_t *brightness) {
+    k_mutex_lock(&usb_pending_mutex, K_FOREVER);
+    if (usb_pending_mask & BIT(LED_PATTERN_FIELD_PATTERN)) {
+        state->pattern = (uint8_t)usb_pending_value[LED_PATTERN_FIELD_PATTERN];
+    }
+    if (usb_pending_mask & BIT(LED_PATTERN_FIELD_BRIGHTNESS)) {
+        *brightness = (uint8_t)usb_pending_value[LED_PATTERN_FIELD_BRIGHTNESS];
+    }
+    if (usb_pending_mask & BIT(LED_PATTERN_FIELD_SPEED)) {
+        state->speed = (uint16_t)usb_pending_value[LED_PATTERN_FIELD_SPEED];
+    }
+    k_mutex_unlock(&usb_pending_mutex);
+}
+
 static bool read_int32(const struct zmk_custom_setting *setting, int32_t *out) {
     struct zmk_custom_setting_value value;
 
@@ -249,8 +274,15 @@ static void led_pattern_apply_settings(void) {
     if (read_int32(live->speed, &speed)) {
         state.speed = (uint16_t)CLAMP(speed, LED_PATTERN_SPEED_MIN, LED_PATTERN_SPEED_MAX);
     }
+    uint8_t next_brightness = led_pattern_get_brightness();
     if (read_int32(live->brightness, &brightness)) {
-        led_pattern_set_brightness((uint8_t)CLAMP(brightness, 0, 100));
+        next_brightness = (uint8_t)CLAMP(brightness, 0, 100);
+    }
+    if (live == &usb_transport) {
+        usb_pending_overlay(&state, &next_brightness);
+    }
+    if (next_brightness != led_pattern_get_brightness()) {
+        led_pattern_set_brightness(next_brightness);
     }
     if (read_bool(&led_pattern_cs_adv_blink, &adv_blink)) {
         state.advertising_indicator = adv_blink;
@@ -262,7 +294,13 @@ static void led_pattern_apply_settings(void) {
     LOG_INF("led: applying %s -> pattern %u speed %u indicator %d idle-off %d", live->name,
             state.pattern, state.speed, (int)state.advertising_indicator, (int)state.idle_off);
 
-    led_pattern_set_state(&state);
+    struct led_pattern_state current;
+    led_pattern_get_state(&current);
+    if (state.pattern != current.pattern || state.speed != current.speed ||
+        state.advertising_indicator != current.advertising_indicator ||
+        state.idle_off != current.idle_off) {
+        led_pattern_set_state(&state);
+    }
 }
 
 static int led_pattern_settings_event_cb(const zmk_event_t *eh) {
@@ -324,6 +362,36 @@ static atomic_t unsaved[ARRAY_SIZE(transports)];
  * path. */
 K_MUTEX_DEFINE(persist_mutex);
 
+/* The custom-settings API raises its change event synchronously. Suppress
+ * only this module's USB-key writes while Studio's CDC port has no client;
+ * the stored value remains readable when Studio reconnects. Do not suppress
+ * BLE writes or writes while the port is open. */
+static bool usb_studio_port_closed(void) {
+#if IS_ENABLED(CONFIG_ZMK_STUDIO_TRANSPORT_UART) && IS_ENABLED(CONFIG_ZMK_USB)
+    if (zmk_endpoint_get_selected().transport == ZMK_TRANSPORT_USB) {
+        const struct device *uart = DEVICE_DT_GET(DT_CHOSEN(zmk_studio_rpc_uart));
+        uint32_t dtr = 0;
+        return !device_is_ready(uart) ||
+               uart_line_ctrl_get(uart, UART_LINE_CTRL_DTR, &dtr) != 0 || dtr == 0;
+    }
+#endif
+    return false;
+}
+
+static int write_led_setting(const struct zmk_custom_setting *setting,
+                             const struct zmk_custom_setting_value *value,
+                             enum zmk_custom_setting_write_mode mode) {
+    const bool suppress = usb_studio_port_closed();
+    if (suppress) {
+        zmk_custom_settings_notify_suppress_begin();
+    }
+    int ret = zmk_custom_setting_write(setting, value, mode);
+    if (suppress) {
+        zmk_custom_settings_notify_suppress_end();
+    }
+    return ret;
+}
+
 static const struct zmk_custom_setting *field_setting(const struct transport_settings *transport,
                                                       enum led_pattern_field field) {
     switch (field) {
@@ -340,6 +408,51 @@ static const struct zmk_custom_setting *field_setting(const struct transport_set
 
 static void persist_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(persist_work, persist_work_handler);
+
+static void usb_coalesce_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(usb_coalesce_work, usb_coalesce_work_handler);
+
+static void usb_coalesce_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+    bool retry = false;
+
+    for (int field = LED_PATTERN_FIELD_PATTERN; field <= LED_PATTERN_FIELD_SPEED; field++) {
+        k_mutex_lock(&usb_pending_mutex, K_FOREVER);
+        const bool pending = (usb_pending_mask & BIT(field)) != 0;
+        const int32_t value = usb_pending_value[field];
+        const uint32_t version = usb_pending_version[field];
+        k_mutex_unlock(&usb_pending_mutex);
+        if (!pending) {
+            continue;
+        }
+
+        const struct zmk_custom_setting *setting = field_setting(&usb_transport, field);
+        const struct zmk_custom_setting_value new_value = ZMK_CUSTOM_SETTING_VALUE_INT32(value);
+        k_mutex_lock(&persist_mutex, K_FOREVER);
+        int ret = write_led_setting(setting, &new_value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+        if (ret == 0) {
+            atomic_set_bit(&unsaved[0], field);
+            k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &persist_work,
+                                        K_MSEC(LED_PATTERN_PERSIST_DELAY_MS));
+        }
+        k_mutex_unlock(&persist_mutex);
+
+        k_mutex_lock(&usb_pending_mutex, K_FOREVER);
+        if (ret == 0 && usb_pending_version[field] == version) {
+            usb_pending_mask &= (uint8_t)~BIT(field);
+        } else {
+            retry = true;
+        }
+        k_mutex_unlock(&usb_pending_mutex);
+        if (ret < 0) {
+            LOG_WRN("led: writing %d to \"%s\" failed (%d)", value, setting->key, ret);
+        }
+    }
+    if (retry) {
+        k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &usb_coalesce_work,
+                                    K_MSEC(LED_PATTERN_USB_COALESCE_MS));
+    }
+}
 
 static void persist_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
@@ -361,8 +474,8 @@ static void persist_work_handler(struct k_work *work) {
             k_mutex_lock(&persist_mutex, K_FOREVER);
             int ret = zmk_custom_setting_read(setting, &value);
             if (ret == 0) {
-                ret = zmk_custom_setting_write(setting, &value,
-                                               ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+                ret = write_led_setting(setting, &value,
+                                        ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
             }
             if (ret == 0) {
                 atomic_clear_bit(&unsaved[t], field);
@@ -381,10 +494,10 @@ static void persist_work_handler(struct k_work *work) {
 }
 
 /*
- * The write is in memory and synchronous, so the change event has already put
- * the value on the LED by the time the next press is decoded, and a step from
- * there starts from it. Flash is the slow part and goes to the low-priority
- * queue, after the keys have been quiet.
+ * BLE writes in memory synchronously. USB applies the LED directly and
+ * coalesces the memory writes above, so a stream of key repeats does not
+ * become a stream of USB Studio notifications. Both paths persist to flash
+ * three seconds after the final memory write.
  */
 int led_pattern_settings_store(enum led_pattern_field field, int32_t value) {
     const struct transport_settings *live = active_transport();
@@ -394,9 +507,22 @@ int led_pattern_settings_store(enum led_pattern_field field, int32_t value) {
         return -EINVAL;
     }
 
+    if (live == &usb_transport) {
+        k_mutex_lock(&usb_pending_mutex, K_FOREVER);
+        usb_pending_value[field] = value;
+        usb_pending_version[field]++;
+        usb_pending_mask |= (uint8_t)BIT(field);
+        k_mutex_unlock(&usb_pending_mutex);
+        k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &usb_coalesce_work,
+                                    K_MSEC(LED_PATTERN_USB_COALESCE_MS));
+        /* The caller applies the hardware value now; Studio gets the final
+         * value from the coalesced memory write above. */
+        return 1;
+    }
+
     const struct zmk_custom_setting_value new_value = ZMK_CUSTOM_SETTING_VALUE_INT32(value);
     k_mutex_lock(&persist_mutex, K_FOREVER);
-    int ret = zmk_custom_setting_write(setting, &new_value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    int ret = write_led_setting(setting, &new_value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     if (ret != 0) {
         k_mutex_unlock(&persist_mutex);
         LOG_WRN("led: writing %d to \"%s\" failed (%d)", value, setting->key, ret);

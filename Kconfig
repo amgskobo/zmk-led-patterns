@@ -45,6 +45,7 @@ config ZMK_LED_PATTERNS_CUSTOM_SETTINGS
     # generated when the Studio RPC is being built, so the base registry alone
     # would let this be selected and then fail on a missing header.
     depends on ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    select UART_LINE_CTRL if ZMK_STUDIO_TRANSPORT_UART && ZMK_USB
     help
       Registers a pattern, brightness, speed and idle-off switch per transport
       (USB and BLE), plus the advertising indicator, in the cross-module

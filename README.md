@@ -13,8 +13,8 @@ halves have found each other before it says anything else.
   bind it;
 - optionally publishes the whole LED state through
   `zmk-feature-custom-settings`, so a client can edit it with no page of its
-  own, and makes those settings the one owner of it: a key press writes the
-  setting and the LED follows;
+  own. BLE key presses update the setting immediately; USB key presses update
+  the LED immediately and coalesce rapid setting writes for Studio;
 - no animation timer. Each pattern reports when it next changes and the redraw
   is scheduled for that moment, and nothing is scheduled at all while the
   keyboard is idle.
@@ -227,14 +227,15 @@ the first eight and losing the other ten. The complete names live where they
 fit - in the parameter metadata a keymap editor draws, and in the public
 header.
 
-**Key presses write these settings.** The settings are the one owner of the
-value. A press writes the setting its behavior is named after, for the live
-transport, and the LED follows through the same change event a client's edit
-raises, so a client shows the press as it happens and switching transports or
-editing another value cannot undo it. The write is in memory at once and saved
-to flash three seconds after the last press: a PERSIST write goes to flash with
-no debounce of its own, so a run of presses would otherwise be one flash write
-per press rather than one per setting.
+**Key presses update the LED immediately.** BLE also updates the live
+transport's setting immediately. USB combines rapid presses into one setting
+write after 300 ms of quiet, so a burst cannot overwhelm Studio's USB
+notification transport; a client shows the final value after that short
+delay. Settings are saved to flash three seconds after the last memory write,
+not once per press. When the USB Studio CDC port is closed, LED-originated
+setting writes suppress only their Studio notifications through the existing
+custom-settings API; the values still update and persist, and a reconnecting
+client can read them. A client edit still applies immediately.
 
 Only the central registers these. A peripheral needs none of its own: whatever
 reaches the central, a key press or an edit made in a client, is mirrored to it

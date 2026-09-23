@@ -22,6 +22,7 @@
 #include <zmk/events/activity_state_changed.h>
 #include <zmk/workqueue.h>
 #include <zmk-led-patterns/led_pattern.h>
+#include <zmk-led-patterns/events/state_changed.h>
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 #include <zmk/endpoints.h>
 #include <zmk/events/endpoint_changed.h>
@@ -39,6 +40,8 @@
 #endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
+
+ZMK_EVENT_IMPL(zmk_led_pattern_state_changed);
 
 #define LED_INDEX 0
 
@@ -1016,19 +1019,33 @@ void led_pattern_get_state(struct led_pattern_state *out) {
 
 uint8_t led_pattern_get_brightness(void) { return brightness_percent; }
 
+static void notify_state_changed(void) {
+    if (controller_ready) {
+        raise_zmk_led_pattern_state_changed(((struct zmk_led_pattern_state_changed){
+            .pattern = active_pattern, .brightness = brightness_percent, .speed = speed_percent}));
+    }
+}
+
 void led_pattern_set_brightness(uint8_t brightness) {
-    brightness_percent = MIN(100, brightness);
+    const uint8_t next = MIN(100, brightness);
+    if (next == brightness_percent) {
+        return;
+    }
+    brightness_percent = next;
     refresh_pattern_output();
     schedule_mirror(K_MSEC(MIRROR_DEBOUNCE_MS));
+    notify_state_changed();
 }
 
 void led_pattern_set_state(const struct led_pattern_state *state) {
     const uint8_t pattern =
         state->pattern < LED_PATTERN_COUNT ? state->pattern : LED_PATTERN_STEADY;
     const bool pattern_changed = pattern != active_pattern;
+    const uint16_t speed = CLAMP(state->speed, LED_PATTERN_SPEED_MIN, LED_PATTERN_SPEED_MAX);
+    const bool shown_changed = pattern_changed || speed != speed_percent;
 
     active_pattern = pattern;
-    speed_percent = CLAMP(state->speed, LED_PATTERN_SPEED_MIN, LED_PATTERN_SPEED_MAX);
+    speed_percent = speed;
     advertising_indicator = state->advertising_indicator;
     idle_off = state->idle_off;
     /* Before the log line and the redraw: turning idle_off off while the
@@ -1056,6 +1073,9 @@ void led_pattern_set_state(const struct led_pattern_state *state) {
 
     refresh_pattern_output();
     schedule_mirror(K_MSEC(MIRROR_DEBOUNCE_MS));
+    if (shown_changed) {
+        notify_state_changed();
+    }
 }
 
 /* A BLE peripheral has no host endpoint or active host profile. It still
