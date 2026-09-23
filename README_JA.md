@@ -319,7 +319,8 @@ pool が一時的に空になるたびに失敗します。
 
 ## 互換性とテスト
 
-基本の behavior は upstream ZMK の `main` でビルドできます。任意の Studio 設定連携には、
+基本の behavior は非 split 構成なら upstream ZMK の `main` でビルドできます。
+split 同期には DYA のリレーイベント API が必要で、upstream split には存在しません。任意の Studio 設定連携には、
 追加で `cormoran/zmk` の `main+dya` と `zmk-feature-custom-settings` が必要です。option を
 無効にすればその依存はなくなります。
 

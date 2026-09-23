@@ -343,7 +343,9 @@ fails whenever the buffer pool is momentarily empty.
 
 ## Compatibility and tests
 
-The base behaviors build against upstream ZMK `main`. The optional Studio
+The base behaviors build against upstream ZMK `main` on a non-split keyboard.
+Split synchronization uses DYA's relay-event API and therefore requires the
+DYA ZMK fork; an upstream split build does not provide that API. The optional Studio
 settings integration additionally needs `cormoran/zmk` `main+dya` and
 `zmk-feature-custom-settings`; leaving the option off removes that dependency.
 
