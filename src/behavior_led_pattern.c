@@ -116,6 +116,7 @@ static enum zmk_activity_state activity_state = ZMK_ACTIVITY_ACTIVE;
  * or mirrored while it is set: the LED has been written dark, and a later
  * write would be latched into the pin for as long as the SoC stays off. */
 static atomic_t powering_off;
+static atomic_t applied_brightness;
 
 /*
  * Everything this module schedules runs on ZMK's low-priority queue.
@@ -807,7 +808,9 @@ static void write_led(uint8_t percent) {
     }
 
     /* The selected board configuration has one PWM LED child (index 0). */
-    (void)led_set_brightness(backlight, LED_INDEX, percent);
+    if (led_set_brightness(backlight, LED_INDEX, percent) == 0) {
+        atomic_set(&applied_brightness, percent);
+    }
 }
 
 /*
@@ -1018,6 +1021,7 @@ void led_pattern_get_state(struct led_pattern_state *out) {
 }
 
 uint8_t led_pattern_get_brightness(void) { return brightness_percent; }
+uint8_t led_pattern_applied_brightness(void) { return (uint8_t)atomic_get(&applied_brightness); }
 
 static void notify_state_changed(void) {
     if (controller_ready) {

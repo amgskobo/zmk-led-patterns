@@ -1,0 +1,15 @@
+description: Battery sensor with LED-load ADC voltage compensation
+
+compatible: "zmk,led-battery-adc-offset"
+
+include: base.yaml
+
+properties:
+  source-sensor:
+    type: phandle
+    required: true
+    description: Uncompensated battery voltage sensor
+  full-duty-offset-mv:
+    type: int
+    required: true
+    description: Measured ADC voltage sag in millivolts at 100 percent LED duty

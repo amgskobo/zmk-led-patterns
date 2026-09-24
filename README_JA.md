@@ -329,6 +329,13 @@ CI は両方の構成で nRF52840 向けの実際の ZMK ファームウェア f
 だけ含まれること、PWM LED の所有者が 1 つになるよう `CONFIG_ZMK_BACKLIGHT` が無効の
 ままであることを確認します。
 
+LED 点灯で電池 ADC が低く出る基板向けに、任意の
+`zmk,led-battery-adc-offset` センサを追加できます。`source-sensor = <&vbatt>` と
+`full-duty-offset-mv = <50>` を設定し、`chosen` の `zmk,battery` をその
+センサへ向けます。ADC サンプル時の各半分の LED 実点灯率に応じて、0～50 mV を
+加算します。消灯時は加算しません。分圧抵抗値による満充電側の固定較正とは
+独立です。50 mV は実測値に合わせて変更し、中間の明るさも実機で確認してください。
+
 host 回帰テストは `bash ./tests/run-host-docker.sh` で最適化ビルドと ASan/UBSan の
 両方を実行します。連続変更で各設定の最新値だけが残ること、設定項目間の独立性、
 送信中の更新、送信失敗後の再試行、値の反映、USB ポート開閉の判定を確認します。

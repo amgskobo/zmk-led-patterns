@@ -341,6 +341,32 @@ findable again after a host disconnect; separately, Zephyr refuses to block for
 an ATT TX buffer when the caller is that queue, so a split write posted from it
 fails whenever the buffer pool is momentarily empty.
 
+## Optional battery ADC load correction
+
+Boards whose LED load makes the battery ADC read low can wrap their existing
+voltage sensor without changing ZMK's battery code. For a measured 50 mV drop
+at 100% LED duty, add this node and select it as `zmk,battery`:
+
+```dts
+/ {
+    chosen { zmk,battery = &led_compensated_battery; };
+    led_compensated_battery: led_compensated_battery {
+        compatible = "zmk,led-battery-adc-offset";
+        source-sensor = <&vbatt>;
+        full-duty-offset-mv = <50>;
+    };
+};
+```
+
+The wrapper takes the *locally applied* LED duty when the ADC sample is fetched,
+then adds `round(50 mV * duty / 100)` to the voltage read from the underlying
+sensor. Pattern-off, brightness zero, idle-off, and power-off add zero. Temporary
+connection indicators use their actual duty. The correction is separate from
+the divider resistor values, which a board may retain for fixed full-charge
+calibration. Both halves need the node if both have the same LED/ADC coupling.
+This linear model is a starting calibration based on measured full-duty sag;
+verify the sign and intermediate duties on the actual hardware before flashing.
+
 ## Compatibility and tests
 
 The base behaviors build against upstream ZMK `main` on a non-split keyboard.
@@ -359,7 +385,8 @@ The host regression suite runs with optimized compilation and ASan/UBSan via
 setting), independent fields, updates during a write, retry after a failed
 write, value overlay, and USB port-open decisions. A deterministic 100,000-step
 interleaving simulation also exercises rapid edits and failed writes; CI requires
-100% line and branch coverage of the small `usb_pending.h` helper. This does not
+100% line and branch coverage of the small `usb_pending.h` helper. The host
+suite also checks the ADC offset arithmetic. This does not
 measure the whole Zephyr module. The USB mitigation applies
 to this module's LED-originated setting notifications. It does not change the
 shared DYA RPC transmitter or guarantee that unrelated Studio producers cannot

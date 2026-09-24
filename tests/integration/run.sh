@@ -40,6 +40,7 @@ west build -s "$work_dir/zmk/app" -d "$work_dir/build" -b xiao_ble/nrf52840/zmk 
 
 test -f "$work_dir/build/zephyr/zmk.uf2"
 grep -q '^CONFIG_ZMK_LED_PATTERNS=y' "$work_dir/build/zephyr/.config"
+grep -q '^CONFIG_ZMK_LED_PATTERNS_BATTERY_ADC_OFFSET=y' "$work_dir/build/zephyr/.config"
 grep -q '^CONFIG_ZMK_LOW_PRIORITY_WORK_QUEUE=y' "$work_dir/build/zephyr/.config"
 if grep -q '^CONFIG_ZMK_BACKLIGHT=y' "$work_dir/build/zephyr/.config"; then
     echo "ZMK backlight unexpectedly enabled as a second LED owner" >&2
