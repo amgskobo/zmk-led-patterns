@@ -1,0 +1,19 @@
+/*
+ * Copyright (c) 2026 amgskobo
+ * SPDX-License-Identifier: MIT
+ *
+ * The peripheral steps the pattern back with its own key, whose behavior runs
+ * on the central and comes back to it as a mirror.
+ */
+
+#include <dt-bindings/zmk/kscan_mock.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+#include "shared.dtsi"
+
+&kscan {
+    /delete-property/ exit-after;
+    /* Each event's delay is also the wait before the next one, so a no-op
+     * release leads: the key goes down at 10 s. */
+    events = <ZMK_MOCK_RELEASE(0,0,5000) ZMK_MOCK_PRESS(0,1,5000) ZMK_MOCK_RELEASE(0,1,200)>;
+};

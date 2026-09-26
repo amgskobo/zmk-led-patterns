@@ -116,6 +116,7 @@ static enum zmk_activity_state activity_state = ZMK_ACTIVITY_ACTIVE;
  * or mirrored while it is set: the LED has been written dark, and a later
  * write would be latched into the pin for as long as the SoC stays off. */
 static atomic_t powering_off;
+static atomic_t applied_brightness;
 
 /*
  * Everything this module schedules runs on ZMK's low-priority queue.
@@ -376,7 +377,7 @@ static void mirror_work_handler(struct k_work *work) {
         .pattern = active_pattern,
         .brightness = brightness_percent,
         .speed = speed_percent,
-        .elapsed_ms = (uint32_t)MAX(k_uptime_get() - pattern_started_at, (int64_t)0),
+        .elapsed_ms = (uint32_t)elapsed_since(pattern_started_at),
         .advertising_blink = advertising_blink,
         .idle_off = idle_off,
         .central_active = activity_state == ZMK_ACTIVITY_ACTIVE,
@@ -553,17 +554,16 @@ static struct pattern_sample segment_sample(const struct pattern_segment *segmen
                                             int64_t elapsed_ms) {
     const uint32_t period = segments[count - 1].until_ms;
     const uint32_t phase = (uint32_t)(elapsed_ms % period);
+    size_t i = 0;
 
-    for (size_t i = 0; i < count; i++) {
-        if (phase < segments[i].until_ms) {
-            return (struct pattern_sample){.brightness = segments[i].brightness,
-                                           .hold_ms = segments[i].until_ms - phase};
-        }
+    /* Ends by the last entry at the latest: phase is below the period, which
+     * is that entry's boundary. */
+    while (phase >= segments[i].until_ms) {
+        i++;
     }
 
-    /* Unreachable: phase is below the period, which is the last boundary. */
-    return (struct pattern_sample){.brightness = segments[count - 1].brightness,
-                                   .hold_ms = period};
+    return (struct pattern_sample){.brightness = segments[i].brightness,
+                                   .hold_ms = segments[i].until_ms - phase};
 }
 
 /* A fixed-step level table: flicker and sparkle shapes, where every entry
@@ -807,7 +807,9 @@ static void write_led(uint8_t percent) {
     }
 
     /* The selected board configuration has one PWM LED child (index 0). */
-    (void)led_set_brightness(backlight, LED_INDEX, percent);
+    if (led_set_brightness(backlight, LED_INDEX, percent) == 0) {
+        atomic_set(&applied_brightness, percent);
+    }
 }
 
 /*
@@ -1018,6 +1020,7 @@ void led_pattern_get_state(struct led_pattern_state *out) {
 }
 
 uint8_t led_pattern_get_brightness(void) { return brightness_percent; }
+uint8_t led_pattern_applied_brightness(void) { return (uint8_t)atomic_get(&applied_brightness); }
 
 static void notify_state_changed(void) {
     if (controller_ready) {

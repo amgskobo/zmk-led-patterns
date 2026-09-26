@@ -4,6 +4,7 @@
 DT_COMPAT_ZMK_BEHAVIOR_LED_PATTERN := zmk,behavior-led-pattern
 DT_COMPAT_ZMK_BEHAVIOR_LED_BRIGHTNESS := zmk,behavior-led-brightness
 DT_COMPAT_ZMK_BEHAVIOR_LED_SPEED := zmk,behavior-led-speed
+DT_COMPAT_ZMK_LED_BATTERY_ADC_OFFSET := zmk,led-battery-adc-offset
 
 config ZMK_LED_PATTERNS
     bool "LED patterns"
@@ -37,6 +38,16 @@ config ZMK_LED_PATTERNS
       state to the peripheral through ZMK's relay-event transport.
 
 if ZMK_LED_PATTERNS
+
+config ZMK_LED_PATTERNS_BATTERY_ADC_OFFSET
+    bool "Compensate battery ADC sag from the locally applied LED brightness"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_LED_BATTERY_ADC_OFFSET))
+    depends on SENSOR
+    help
+      Enables an optional battery sensor wrapper. Its devicetree node points
+      at the board's raw battery sensor and supplies the measured voltage sag
+      at full LED duty. The wrapper adds a proportional correction to voltage
+      samples, without modifying upstream ZMK's battery reporting code.
 
 config ZMK_LED_PATTERNS_CUSTOM_SETTINGS
     bool "Publish the LED state through zmk-feature-custom-settings"

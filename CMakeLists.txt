@@ -12,6 +12,10 @@ if(CONFIG_ZMK_LED_PATTERNS)
   )
 endif()
 
+if(CONFIG_ZMK_LED_PATTERNS_BATTERY_ADC_OFFSET)
+  target_sources(app PRIVATE src/battery_adc_offset.c)
+endif()
+
 if(CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS)
   # Also on the app target: it includes zmk/studio/custom.h, which pulls ZMK's
   # nanopb-generated proto/zmk/custom.pb.h, and that header is only on the app
