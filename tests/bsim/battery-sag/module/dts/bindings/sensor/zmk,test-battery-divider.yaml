@@ -1,0 +1,46 @@
+# Copyright (c) 2026 amgskobo
+# SPDX-License-Identifier: MIT
+
+description: |
+  Test stand-in for ZMK's zmk,battery-voltage-divider on nrf52_bsim, which has
+  no SAADC. It models the hardware in front of the divider: a battery at a
+  fixed voltage that sags under the LED's current in proportion to its duty,
+  the physical resistor divider, and the SAADC's 12-bit conversion at gain 1/6
+  and its 0.6 V reference. From the converted pin voltage on it repeats the
+  divider driver's arithmetic with the devicetree resistor values, and it
+  serves the same sensor channels.
+
+compatible: "zmk,test-battery-divider"
+
+include: base.yaml
+
+properties:
+  battery-millivolts:
+    type: int
+    required: true
+    description: The battery's open-circuit voltage
+  led-sag-mv:
+    type: int
+    required: true
+    description: How far the battery sags at 100 percent LED duty
+  actual-output-ohms:
+    type: int
+    required: true
+    description: The physical divider's lower resistor
+  actual-full-ohms:
+    type: int
+    required: true
+    description: The physical divider's total resistance
+  output-ohms:
+    type: int
+    required: true
+    description: The lower resistor as the devicetree tells the driver
+  full-ohms:
+    type: int
+    required: true
+    description: The total resistance as the devicetree tells the driver
+  mv-to-pct-thresholds:
+    type: array
+    description: >-
+      As on the DYA fork's zmk,battery-voltage-divider. Without it the sensor
+      maps like upstream's divider, with ZMK's fixed lithium-ion line.

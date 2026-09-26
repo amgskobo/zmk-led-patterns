@@ -1,0 +1,21 @@
+central <inf> test_battery_divider: divider: LED 100%, battery 3775 mV, pin 1274 mV, reads 3786 mV = 45% uncorrected
+central <inf> battery_observer: battery: reports 52%
+peripheral <inf> test_battery_divider: divider: LED 100%, battery 3775 mV, pin 1274 mV, reads 3786 mV = 44% uncorrected
+peripheral <inf> battery_observer: battery: reports 51%
+central <inf> battery_observer: battery: peripheral 0 reports 51% over BLE
+central <inf> test_battery_divider: divider: LED 96%, battery 3777 mV, pin 1275 mV, reads 3789 mV = 46% uncorrected
+peripheral <inf> test_battery_divider: divider: LED 82%, battery 3784 mV, pin 1277 mV, reads 3795 mV = 46% uncorrected
+central <inf> test_battery_divider: divider: LED 13%, battery 3818 mV, pin 1289 mV, reads 3831 mV = 51% uncorrected
+peripheral <inf> test_battery_divider: divider: LED 28%, battery 3811 mV, pin 1286 mV, reads 3822 mV = 49% uncorrected
+central <inf> test_battery_divider: divider: LED 96%, battery 3777 mV, pin 1275 mV, reads 3789 mV = 46% uncorrected
+peripheral <inf> test_battery_divider: divider: LED 82%, battery 3784 mV, pin 1277 mV, reads 3795 mV = 46% uncorrected
+central <inf> zmk: led: state pattern 0 speed 100 brightness 100%
+central <inf> test_battery_divider: divider: LED 13%, battery 3818 mV, pin 1289 mV, reads 3831 mV = 51% uncorrected
+peripheral <inf> test_battery_divider: divider: LED 28%, battery 3811 mV, pin 1286 mV, reads 3822 mV = 49% uncorrected
+central <inf> test_battery_divider: divider: LED 100%, battery 3775 mV, pin 1274 mV, reads 3786 mV = 45% uncorrected
+peripheral <inf> test_battery_divider: divider: LED 100%, battery 3775 mV, pin 1274 mV, reads 3786 mV = 44% uncorrected
+central <inf> test_battery_divider: divider: LED 0%, battery 3825 mV, pin 1291 mV, reads 3837 mV = 52% uncorrected
+peripheral <inf> test_battery_divider: divider: LED 0%, battery 3825 mV, pin 1291 mV, reads 3837 mV = 51% uncorrected
+central <inf> test_battery_divider: divider: LED 50%, battery 3800 mV, pin 1283 mV, reads 3813 mV = 49% uncorrected
+peripheral <inf> test_battery_divider: divider: LED 50%, battery 3800 mV, pin 1283 mV, reads 3813 mV = 48% uncorrected
+peripheral <inf> test_battery_divider: divider: LED 100%, battery 3775 mV, pin 1274 mV, reads 3786 mV = 44% uncorrected

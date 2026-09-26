@@ -1,0 +1,23 @@
+/*
+ * Copyright (c) 2026 amgskobo
+ * SPDX-License-Identifier: MIT
+ *
+ * The peripheral presses nothing: its LED follows the central's mirror, and
+ * its battery level reaches the central through its BAS. Its divider carries
+ * the DYA fork's mv-to-pct-thresholds; the central's has none and maps like
+ * upstream's, so one run covers both of the wrapper's mappings.
+ */
+
+#include <dt-bindings/zmk/kscan_mock.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+#include "shared.dtsi"
+
+&kscan {
+    /delete-property/ exit-after;
+    events = <ZMK_MOCK_RELEASE(0,0,100)>;
+};
+
+&test_vbatt {
+    mv-to-pct-thresholds = <3450 4200>;
+};
