@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      - name: Exercise USB coalescing and closed-port decisions
+      - name: Exercise the helpers and every lifted function with full coverage
         run: bash ./tests/run-host-docker.sh
   firmware:
     runs-on: ubuntu-latest

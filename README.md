@@ -344,8 +344,9 @@ fails whenever the buffer pool is momentarily empty.
 ## Optional battery ADC load correction
 
 Boards whose LED load makes the battery ADC read low can wrap their existing
-voltage sensor without changing ZMK's battery code. For a measured 50 mV drop
-at 100% LED duty, add this node and select it as `zmk,battery`:
+`zmk,battery-voltage-divider` without changing ZMK's battery code. For a
+measured 50 mV drop at 100% LED duty, add this node and select it as
+`zmk,battery`:
 
 ```dts
 / {
@@ -358,12 +359,20 @@ at 100% LED duty, add this node and select it as `zmk,battery`:
 };
 ```
 
-The wrapper takes the *locally applied* LED duty when the ADC sample is fetched,
-then adds `round(50 mV * duty / 100)` to the voltage read from the underlying
-sensor. Pattern-off, brightness zero, idle-off, and power-off add zero. Temporary
-connection indicators use their actual duty. The correction is separate from
-the divider resistor values, which a board may retain for fixed full-charge
-calibration. Both halves need the node if both have the same LED/ADC coupling.
+On every sample the wrapper reads the divider's voltage, takes the *locally
+applied* LED duty the ADC has just seen, and adds `round(50 mV * duty / 100)`.
+Pattern-off, brightness zero, idle-off, and power-off add zero. Temporary
+connection indicators use their actual duty. ZMK reports the state of charge,
+which the divider computes from its own, uncorrected voltage, so the wrapper
+maps the corrected voltage to a percentage again exactly as the divider does:
+over the divider's `mv-to-pct-thresholds` on the DYA fork, read from the same
+node, and with ZMK's fixed lithium-ion line (0% at 3450 mV, 100% at 4200 mV)
+on upstream ZMK, whose divider has no thresholds. It serves both
+`SENSOR_CHAN_GAUGE_VOLTAGE` and
+`SENSOR_CHAN_GAUGE_STATE_OF_CHARGE`. BAS, the split peripheral's level and any
+display then see the corrected value. The correction stacks on the divider
+resistor values, which a board may keep as its fixed base calibration. Both
+halves need the node if both have the same LED/ADC coupling.
 This linear model is a starting calibration based on measured full-duty sag;
 verify the sign and intermediate duties on the actual hardware before flashing.
 
@@ -377,8 +386,10 @@ settings integration additionally needs `cormoran/zmk` `main+dya` and
 
 CI builds a real nRF52840 ZMK firmware fixture in both configurations. It checks
 that all three behaviors are linked, that the DYA setting namespace and all nine keys
-are present only in the DYA build, and that `CONFIG_ZMK_BACKLIGHT` stays off so
-there is only one owner of the PWM LED.
+are present only in the DYA build, that `CONFIG_ZMK_BACKLIGHT` stays off so
+there is only one owner of the PWM LED, and that ZMK's battery reporting, in its
+state-of-charge fetch mode, reads the linked battery wrapper as its chosen
+`zmk,battery`.
 
 The host regression suite runs with optimized compilation and ASan/UBSan via
 `bash ./tests/run-host-docker.sh`. It covers burst coalescing (latest value per
@@ -386,9 +397,47 @@ setting), independent fields, updates during a write, retry after a failed
 write, value overlay, and USB port-open decisions. A deterministic 100,000-step
 interleaving simulation also exercises rapid edits and failed writes; CI requires
 100% line and branch coverage of the small `usb_pending.h` helper. The host
-suite also checks the ADC offset arithmetic and fault-injects the actual
-battery sensor callbacks, requiring 100% of their lines and branches. This does not
-measure the whole Zephyr module. The USB mitigation applies
+suite also checks the ADC offset arithmetic, compares both percentage mappings
+with ZMK's own code (the float interpolation and the lithium-ion line) at every
+millivolt from 0 to 5 V, and fault-injects the actual battery sensor callbacks
+against a stand-in that, like the real divider, refuses anything but the gauge
+channels. It then lifts every function of the module's C
+sources into the stubbed harnesses in `tests/runtime/`: the eighteen curves
+and their clock, drawing, idle and power-off handling, the state API and all
+three behaviors, built as a standalone keyboard with and without BLE, as a
+split central (indicator, connect-time exchange, mirror) and as a split
+peripheral (mirror, acknowledgement, the central's word on activity); and the
+settings bridge with and without USB (per-transport sets, USB coalescing,
+deferred flash saves with retry, notification suppression while Studio's port
+is closed). CI requires 100% line and branch coverage of every lifted function.
+Devicetree instantiation, relay registration and the settings declarations are
+left to the firmware fixtures above.
+
+The split mirror itself is tested end to end over BabbleSim, Zephyr's
+simulated radio, with `bash ./tests/bsim/run-docker.sh`: a real split central
+and peripheral built for `nrf52_bsim` link over BLE, sync, and follow a
+pattern change made by a key on either half - each change mirrored to the
+peripheral and acknowledged back - and the log of both halves must match
+`tests/bsim/split-mirror/snapshot.log`. The first run builds a DYA-fork
+workspace with BabbleSim into the Docker volume `zmk-bsim-ws`. A reset is not
+covered: a simulated device that reboots exits, ending the simulation.
+
+The battery correction runs end to end the same way, in
+`tests/bsim/battery-sag`. The simulator has no SAADC, so a test-only module
+stands in for the divider and models what is in front of it: a 3825 mV battery
+that sags 50 mV at full LED duty, a physical 1 M / 510 k divider read through
+a 12-bit SAADC at gain 1/6, and from the pin voltage on the divider driver's own
+arithmetic with 507 k devicetree values. Both halves sample every second
+through the real wrapper and ZMK's real battery reporting, while the central
+steps the LED from its startup animation through 0, 50 and 100 percent and the
+peripheral follows by mirror. The snapshot holds the stand-in's uncorrected
+readings, which move with the LED, and the levels ZMK reports, which must not:
+each half's own, and the peripheral's as the central reads it from the
+peripheral's BAS over the simulated link. The central's divider has no
+thresholds and the peripheral's has, so one run covers both mappings. With
+the offset set to zero, the reported levels follow the LED and the test fails.
+
+The USB mitigation applies
 to this module's LED-originated setting notifications. It does not change the
 shared DYA RPC transmitter or guarantee that unrelated Studio producers cannot
 block if its transmit buffer fills.

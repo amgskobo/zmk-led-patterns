@@ -51,6 +51,12 @@ strings "$work_dir/build/zephyr/zmk.elf" >"$work_dir/build/zephyr/strings.txt"
 grep -Fxq led_pattern "$work_dir/build/zephyr/strings.txt"
 grep -Fxq led_brightness "$work_dir/build/zephyr/strings.txt"
 grep -Fxq led_speed "$work_dir/build/zephyr/strings.txt"
+# ZMK's battery reporting reads DT_CHOSEN(zmk_battery), and it must be the LED
+# wrapper, linked, in the state-of-charge fetch mode the wrapper recomputes.
+grep -q '^CONFIG_ZMK_BATTERY_REPORTING=y' "$work_dir/build/zephyr/.config"
+grep -q '^CONFIG_ZMK_BATTERY_REPORTING_FETCH_MODE_STATE_OF_CHARGE=y' "$work_dir/build/zephyr/.config"
+grep -Eq '^[[:space:]]*zmk,battery = &led_patterns_test_battery;' "$work_dir/build/zephyr/zephyr.dts"
+grep -Fxq led_patterns_test_battery "$work_dir/build/zephyr/strings.txt"
 # The fixture turns device power management on, so both power-off devices
 # that write the LED dark before the SoC goes off are built.
 grep -q '^CONFIG_PM_DEVICE=y' "$work_dir/build/zephyr/.config"

@@ -37,6 +37,6 @@ docker run --rm --volume "$repo_root:/src:ro" "$image" /bin/bash -lc '
     printf "%s\n" "$battery_coverage"
     battery_helper=$(printf "%s\n" "$battery_coverage" | grep -F -A4 "/src/include/zmk-led-patterns/battery_adc_offset.h")
     printf "%s\n" "$battery_helper" | grep -Fq "Lines executed:100.00%"
-    printf "%s\n" "$battery_helper" | grep -Fq "No branches"
-    python3 /src/tests/battery_driver/run.py
+    printf "%s\n" "$battery_helper" | grep -Fq "Taken at least once:100.00%"
+    python3 /src/tests/runtime/run.py
 '
