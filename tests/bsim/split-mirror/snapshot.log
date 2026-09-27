@@ -1,0 +1,14 @@
+central <inf> zmk: led: connected, role 1 (host), status 0
+central <inf> zmk: led: connected, role 0 (split peer), status 0
+central <inf> zmk: led: split stage 0 -> 1
+peripheral <inf> zmk: led: split stage 0 -> 1
+central <inf> zmk: led: mirroring pattern 1 to the peripheral (attempt 1)
+peripheral <inf> zmk: led: split stage 1 -> 2
+central <inf> zmk: led: peripheral 1 acknowledged pattern 1, phase skew <n> ms
+central <inf> zmk: led: split stage 1 -> 2
+central <inf> zmk: led: state pattern 2 speed 100 brightness 100%
+central <inf> zmk: led: mirroring pattern 2 to the peripheral (attempt 1)
+central <inf> zmk: led: peripheral 1 acknowledged pattern 2, phase skew <n> ms
+central <inf> zmk: led: state pattern 1 speed 100 brightness 100%
+central <inf> zmk: led: mirroring pattern 1 to the peripheral (attempt 1)
+central <inf> zmk: led: peripheral 1 acknowledged pattern 1, phase skew <n> ms

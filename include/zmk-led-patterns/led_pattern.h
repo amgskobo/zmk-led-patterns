@@ -61,6 +61,9 @@ void led_pattern_get_state(struct led_pattern_state *out);
  */
 void led_pattern_set_state(const struct led_pattern_state *state);
 uint8_t led_pattern_get_brightness(void);
+/* Last brightness successfully written to the local LED, including pattern
+ * phase and temporary status indicators. Safe to read from a sensor driver. */
+uint8_t led_pattern_applied_brightness(void);
 void led_pattern_set_brightness(uint8_t brightness);
 
 /* The three values the behaviors edit, one behavior each. */

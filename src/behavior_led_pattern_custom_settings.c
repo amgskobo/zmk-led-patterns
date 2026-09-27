@@ -254,8 +254,10 @@ static void led_pattern_apply_settings(void) {
     int32_t pattern;
     int32_t speed;
     int32_t brightness;
-    bool adv_blink;
-    bool idle_off;
+    /* Only used after a successful read; initialised so that nothing read
+     * from the stack can ever reach the LED state. */
+    bool adv_blink = false;
+    bool idle_off = false;
 
     led_pattern_get_state(&state);
 
@@ -340,7 +342,12 @@ ZMK_SUBSCRIPTION(led_pattern_custom_settings, zmk_endpoint_changed);
  */
 #define LED_PATTERN_PERSIST_DELAY_MS 3000
 
-static const struct transport_settings *const transports[] = {&usb_transport, &ble_transport};
+enum { TRANSPORT_USB, TRANSPORT_BLE };
+
+static const struct transport_settings *const transports[] = {
+    [TRANSPORT_USB] = &usb_transport,
+    [TRANSPORT_BLE] = &ble_transport,
+};
 
 /* Per transport, the fields a key press has changed in memory and not saved.
  * Set on the thread the press arrives on, cleared on the low-priority queue. */
@@ -424,7 +431,7 @@ static void usb_coalesce_work_handler(struct k_work *work) {
         k_mutex_lock(&persist_mutex, K_FOREVER);
         int ret = write_led_setting(setting, &new_value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
         if (ret == 0) {
-            atomic_set_bit(&unsaved[0], field);
+            atomic_set_bit(&unsaved[TRANSPORT_USB], field);
             k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &persist_work,
                                         K_MSEC(LED_PATTERN_PERSIST_DELAY_MS));
         }
@@ -518,7 +525,8 @@ int led_pattern_settings_store(enum led_pattern_field field, int32_t value) {
         return ret;
     }
 
-    atomic_set_bit(&unsaved[live == &usb_transport ? 0 : 1], field);
+    /* USB returned above, so this is the BLE set. */
+    atomic_set_bit(&unsaved[TRANSPORT_BLE], field);
     k_mutex_unlock(&persist_mutex);
     k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &persist_work,
                                 K_MSEC(LED_PATTERN_PERSIST_DELAY_MS));

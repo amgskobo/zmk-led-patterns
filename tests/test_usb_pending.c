@@ -68,6 +68,9 @@ static void test_overlay_and_port_state(void) {
     assert(led_pattern_usb_port_closed(true, true, false, 0));
     assert(led_pattern_usb_port_closed(true, true, true, 0));
     assert(!led_pattern_usb_port_closed(true, true, true, 1));
+    /* Any one of the three alone is enough to call the port closed. */
+    assert(led_pattern_usb_port_closed(true, false, true, 1));
+    assert(led_pattern_usb_port_closed(true, true, false, 1));
 }
 
 static uint32_t next_random(uint32_t *seed) {

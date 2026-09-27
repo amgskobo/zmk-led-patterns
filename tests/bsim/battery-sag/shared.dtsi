@@ -1,0 +1,59 @@
+/*
+ * Copyright (c) 2026 amgskobo
+ * SPDX-License-Identifier: MIT
+ *
+ * What both halves share: the LED behaviors, a GPIO LED standing in for the
+ * PWM LED (the applied duty is still the percentage written), and the battery
+ * path of real hardware. The stand-in divider models a 3825 mV battery that
+ * sags 50 mV at full LED duty, the XIAO's physical 1 M / 510 k divider and
+ * the SAADC; its devicetree resistor values are the 507 k base calibration.
+ * The LED wrapper adds back 50 mV at full duty and is what ZMK reads. The
+ * divider has no mv-to-pct-thresholds here; peripheral.overlay adds them.
+ */
+
+/ {
+    behaviors {
+        led_pattern: led_pattern {
+            compatible = "zmk,behavior-led-pattern";
+            #binding-cells = <1>;
+        };
+
+        led_brightness: led_brightness {
+            compatible = "zmk,behavior-led-brightness";
+            #binding-cells = <1>;
+        };
+    };
+
+    chosen {
+        zmk,backlight = &test_leds;
+        zmk,battery = &test_compensated_battery;
+    };
+
+    test_leds: test_leds {
+        compatible = "gpio-leds";
+
+        test_led: test_led {
+            gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
+        };
+    };
+
+    test_vbatt: test_vbatt {
+        compatible = "zmk,test-battery-divider";
+        battery-millivolts = <3825>;
+        led-sag-mv = <50>;
+        actual-output-ohms = <510000>;
+        actual-full-ohms = <(1000000 + 510000)>;
+        output-ohms = <507000>;
+        full-ohms = <(1000000 + 507000)>;
+    };
+
+    test_compensated_battery: test_compensated_battery {
+        compatible = "zmk,led-battery-adc-offset";
+        source-sensor = <&test_vbatt>;
+        full-duty-offset-mv = <50>;
+    };
+};
+
+&gpio0 {
+    status = "okay";
+};
