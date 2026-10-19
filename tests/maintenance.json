@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "owner": "zmk-led-patterns",
+  "supported_cores": [
+    "stock-zmk",
+    "dya"
+  ],
+  "unsupported_core_status": "NOT APPLICABLE",
+  "commands": [
+    "bash tests/run-host-docker.sh",
+    "bash tests/run-integration-docker.sh",
+    "ZMK_TEST_OFFLINE_WORKSPACE=/absolute/resolved/workspace ZMK_TEST_OUTPUT=/absolute/new/output bash tests/integration/run.sh upstream|dya",
+    "python3 -m unittest discover -v -s tests/integration -p test_registration.py",
+    "bash tests/integration/validate.sh BUILD_ROOT upstream|dya ROLE FRESH_VALIDATION_OUTPUT [SETTINGS_MODULE]",
+    "bash tests/native/run_scheduled.sh /absolute/resolved/workspace /absolute/fresh/output",
+    "python3 tests/protocol_negative.py /absolute/fresh/output",
+    "bash tests/run-traffic.sh /absolute/fresh/output",
+    "python3 tests/traffic_compare.py BASELINE_OUTPUT CANDIDATE_OUTPUT FRESH_COMPARISON_OUTPUT",
+    "python3 tests/wire_negative.py /absolute/fresh/output",
+    "bash tests/run-on-demand.sh /absolute/fresh/output",
+    "python3 tests/on_demand_negative.py /absolute/fresh/output",
+    "python3 tests/traffic_negative.py /absolute/fresh/output",
+    "python3 tests/traffic_baseline.py ARCHIVED_SELECTED_ASSERTIONS_JSON /absolute/fresh/headers",
+    "python3 tests/test_traffic_compare.py BASELINE_OUTPUT CANDIDATE_OUTPUT FRESH_SENSITIVITY_OUTPUT",
+    "python3 tests/traffic_fixture.py /absolute/fresh/pinned-output",
+    "python3 -m unittest discover -v -s tests -p test_integration_*.py",
+    "bash tests/run-integration-docker.sh upstream",
+    "bash tests/run-integration-docker.sh dya",
+    "ZMK_TEST_LED_ROLE=central bash tests/run-integration-docker.sh dya",
+    "ZMK_TEST_LED_ROLE=peripheral bash tests/run-integration-docker.sh dya",
+    "ZMK_TEST_CUSTOM_SETTINGS_MODULE=/absolute/current-settings bash tests/run-integration-docker.sh dya",
+    "python3 tests/native/controls.py run /absolute/resolved/workspace /absolute/fresh/native-controls",
+    "python3 tests/native/controls.py validate /absolute/retained/native-controls /absolute/fresh/control-report",
+    "python3 -m unittest discover -v -s tests/native -p test_controls.py",
+    "python3 -m unittest discover -v -s tests -p test_python_assertion_admission.py"
+  ],
+  "coverage_map": "tests/contract.json",
+  "preserved_assertions": "Affected prior periodic assertions/source hashes archived before semantic changes; tests/README.md records intentional on-demand replacements and the native-admission/deterministic-parser consolidation map. All unique retained admission/session/quality/codec/runtime gates remain, including newer-resume sequence fencing across old completion/confirmed-latest suppression and prior-view rollback, installed-output REQUEST interleavings, and obsolete-session completion retirement without losing pending state or generating a new-identity ACK; no snapshot auto-accept.",
+  "execution": {
+    "quick": "All behavioral engine/runtime scenarios once with sanitizers; all8 actual-comparator trace corruptions use explicitly copied parser inputs. Includes synthetic native-control parser/dispatcher scenarios withsubtests, notkernel executions. Includes synthetic optimized-Python and nonassertion-abort admission and complete settings-presentation snapshot checks.",
+    "full": "Same scenarios plus optimization/ABI/coverage and actual optimizedtraffic binary3repeats; all8 comparator controls; realkernel and supportedcore separate canonical entries. Includes the same native-control parser/dispatcher scenarios; actual13mode kernel sensitivity is separate. The same optimized-Python/nonassertion-abort admission and complete-presentation scenarios remain selected.",
+    "outputs": "Use a fresh evidence directory; existing evidence is never overwritten.",
+    "native": "Canonical scheduled native:17central+16peripheral scenarios, same binary3runs each=99 completions;13controlmodes/18rolevariants3runs=54expected assertion failures. A parked K_FOREVER descriptor is not an active timeout; alreadyqueued/running work remains separately accounted."
+  },
+  "gaps": [
+    "Physical USB/BLE/split delivery, timing, power and retention require matching production-board evidence.",
+    "Event dispatch success does not acknowledge Studio queue admission or transport delivery.",
+    "Original c6a7 registry compatibility retains its inherited global-suppression concurrency limitation; current quiet events are checked separately.",
+    "Scheduled clock quality is a software model; physical drift/phase, lossy delivery, scheduler/electrical bounds, power and stack high-water remain unmeasured.",
+    "One split peer is an explicit build boundary; probabilistic32-bit boot nonce is not authentication.",
+    "Protocol header coverage is informational; exhaustive adversarial sequences and physical queue/radio behavior are not claimed.",
+    "Version4/ls4 requires paired matching firmware;56-byte event fits one relay chunk at configured MTU65. Physical power/airtime remain unmeasured.",
+    "On-demand coasting intentionally has no current phase accuracy bound; fresh reservations/completion retain50ms/8s/1000ppm. Finite retries do not guarantee recovery under loss.",
+    "REQUEST hint retired-boot history is bounded to four entries; random32-bit boot identity and challenge replay fences are not authentication.",
+    "Traffic comparisons use controlled deterministic queues and explicit ordered state/time/recovery assertions, not physical BLE delivery.",
+    "Native fixtures emit production function definitions with controlled declarations/framework APIs; complete translation-unit initialization/registration and physical behavior require separate firmware/board evidence."
+  ],
+  "ci": {
+    "entry": ".github/workflows/test.yml",
+    "host": "Canonical quick for push/PR; full for manual/schedule, all scenarios including wrapper/lifecycle checks.",
+    "firmware": "Stock standalone, DYA standalone, DYA central, DYA peripheral via canonical Docker wrapper; default legacy registry retained.",
+    "native": "Canonical scheduled positive suite, both roles3identical runs; exact Zephyr10ba6d0 and SDK digest, owner/kernelRO + freshoutputRW, networknone.",
+    "artifacts": "Unique per-job run/attempt raw logs; explicit firmware/native result roots retained; host temporary binaries omitted. Hosted execution requires its own successful CI run."
+  },
+  "native_controls": {
+    "entry": "tests/native/controls.py",
+    "run": "Runs13modes/18rolevariants, eachbinary3times; validates54intended assertion failures.",
+    "validate": "Reads existing complete results and creates a fresh report without executing a binary; same target/identity/admission checks.",
+    "unit": "tests/native/test_controls.py:synthetic parser/dispatcher scenarios, defaultquick/full; local corruptions use one-mode fixtures while full-matrix/dispatcher checks remain. Fake records are not native/hardware evidence."
+  }
+}

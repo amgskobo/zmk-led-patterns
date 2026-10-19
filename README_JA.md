@@ -13,9 +13,10 @@
   editor で割り当てられます。
 - 任意で LED の状態全体を `zmk-feature-custom-settings` を通じて公開し、client が
   専用の画面なしで編集できるようにします。BLE のキー操作は設定に即時反映し、
-  USB の連続操作は LED を即時反映しつつ設定通知をまとめます。
-- アニメーション用のタイマーはありません。各パターンが次に変化する時刻を返し、
-  その時点に再描画を予約します。キーボードが idle の間は何も予約しません。
+  USB の連続操作は設定通知をまとめます。split の表示変更は共通の将来時刻に適用します。
+- 固定周期のアニメーション tick はありません。各パターンが次の変化時刻を返します。
+  idle-off 有効時は idle 中の通常アニメーションを止めます。設定・接続・電源の
+  有効な変化には、それぞれ上限のある処理が残ります。
 
 ## インストール
 
@@ -129,10 +130,12 @@ module は `LED` と `ZMK_LOW_PRIORITY_WORK_QUEUE` を select し、split ビル
 段階的な変更は 10 の倍数に揃います。client から明るさを 95 にした場合、端数の 5 を
 残さず 100 か 90 へ移ります。速度の段階変更も上下限の間で同じように動きます。
 
-明るさ 0 は暗い状態ではなく、LED の低消費電力状態です。段階的に下げて到達することも
-できます。LED には一度だけ 0 を書き込み、PWM peripheral を停止させ、明るさが再び
-上がるまで再描画を一切予約しません。上がったときは、パターンの時計が進んだ位置から
-再開します。明るさ 0 でも点灯するのは split の接続インジケーターだけです。これは
+明るさ 0 は LED driver に 0 を要求し、明るさが再び上がるまで通常アニメーションの
+再描画を止めます。実際の電気的な出力や電流は driver と PWM 回路に依存します。
+split も定期的な時計通信は行わず、設定や接続などの有効な変化があった場合だけ
+必要な同期を行います。再び明るくするとき、再利用可能な新しい時計なら位相を維持
+できます。古い時計や refit が必要な場合は、検証した将来の共通時刻から新しい位相を
+開始します。明るさ 0 でも点灯するのは split の接続インジケーターだけです。これは
 診断用であり、LED の設定に関係なく同じ見た目である必要があるからです。advertising
 インジケーターはパターンと同じく明るさに応じて変わるため、0 では消灯します。
 
@@ -142,10 +145,11 @@ module は `LED` と `ZMK_LOW_PRIORITY_WORK_QUEUE` を select し、split ビル
 電荷で同じことが起きます)。`CONFIG_PM_DEVICE`(soft off が選択します)があると、
 このモジュールは小さな電源管理デバイスを 2 つ登録します。2 つの電源オフ経路はデバイスを
 逆の順序で suspend するため、1 つは init 順で PWM ドライバーより前、もう 1 つは LED
-デバイスより後に置きます。先に動いた方がアニメーションと split のミラーを止め、LED
-ドライバーがまだ動いているうちに 0 を書き込みます。もう一方はそれが済んでいるのを
-確認するだけです。電源オフが中止されて resume した場合は、パターンの時計が進んだ位置
-から再描画します。優先度は `CONFIG_ZMK_LED_PATTERNS_PM_INIT_PRIORITY`(45)と
+デバイスより後に置きます。先に動いた方がsplit sessionをfenceし、アニメーションを止め、
+LED driverが動いているうちに0を書き込んでから送信処理の終了を待ちます。もう一方は
+それが済んでいるのを確認するだけです。電源オフが中止されてresumeした場合、splitは
+新しい時刻交換と将来予約を開始し、standaloneはlocalの曲線を再描画します。
+優先度は `CONFIG_ZMK_LED_PATTERNS_PM_INIT_PRIORITY`(45)と
 `CONFIG_ZMK_LED_PATTERNS_PM_LATE_INIT_PRIORITY`(95)です。
 
 速度は、各パターンが描かれた速さに対する百分率です。パターンごとではなく
@@ -155,7 +159,8 @@ module は `LED` と `ZMK_LOW_PRIORITY_WORK_QUEUE` を select し、split ビル
 `CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS=y` の場合、binding は LED を直接変更しません。
 現在接続中の transport について behavior の名前に対応する設定へ書き込み、LED はその
 設定に従います([Studio 設定](#studio-設定)を参照)。この option がなければ、binding は
-値を LED へ直接適用します。
+controller へ直接要求します。どちらの経路も、standalone は直ちに表示へ反映し、
+split は共通の将来の予約時刻に反映します。
 
 各 behavior は ZMK のパラメーター metadata を公開します。これにより Studio の keymap
 editor で選択できます。metadata を公開しない behavior はパラメーターを取らないものと
@@ -175,8 +180,11 @@ editor で選択できます。metadata を公開しない behavior はパラメ
 | 7 | `LED_PATTERN_CANDLE` | 16 | `LED_PATTERN_RIPPLE` |
 | 8 | `LED_PATTERN_SAWTOOTH` | 17 | `LED_PATTERN_FADE_BLINK` |
 
-`LED_PATTERN_COUNT` は最後の番号の次の値です。パターンを追加するときは、これを
-増やして曲線を追加します。切り替えコマンドと設定の範囲は自動で追従します。
+`LED_PATTERN_COUNT` は最後の番号の次の値です。値を増やすと、切り替えコマンドと設定の範囲も
+追従します。パターンの追加時は、曲線と split protocol の範囲を更新し、必要に応じて
+左右共通の wire schema / version も更新してください。桁あふれを避ける位相計算に使う
+周期の最小公倍数を再計算し、曲線・runtime・codec・64bit 位相のテストも更新します。
+スケジュールや wire の契約を変える場合は kernel の確認も行ってください。
 
 ## Studio 設定
 
@@ -205,9 +213,9 @@ advertising 中で endpoint がない状態)は BLE の組を読みます。明�
 異なるからです。advertising インジケーターだけは分けていません。どの接続かではなく、
 接続がまったくないことを示すものだからです。
 
-`idle_off` が transport ごとなのは、この理由が最も強く当てはまるからです。USB は
-ケーブルであり、idle 中も LED を点けておくコストは問題になりません。BLE は電池であり、
-この module の中で実際に使用時間を縮める唯一の設定です。
+`idle_off` を transport ごとに持つため、USB 給電中はアニメーションを続け、
+BLE 使用中は idle で通常表示を止める方針を選べます。明るさ、パターン、LED 回路、
+無線通信も消費電力に影響します。この module では電流や電池の持続時間を実測していません。
 
 パターンが名前付きの dropdown ではなく 0 - 17 の数値なのは、Studio RPC の schema が
 options 制約を 8 個までに制限し、handler が何も言わずに切り詰めるからです。18 個の
@@ -215,14 +223,22 @@ options 制約を 8 個までに制限し、handler が何も言わずに切り�
 完全な名前は、収まる場所(keymap editor が表示するパラメーター metadata と公開
 ヘッダー)にあります。
 
-**キー操作は LED に即時反映します。** BLE では使用中の設定も即時に書き換えます。
-USB では連続操作をまとめ、最後の操作から 300 ms 後に設定へ書き込みます。
-Studio にはその最終値が短い遅延の後に届き、USB の通知キューが連打で満杯に
-なるのを防ぎます。USB の Studio 用 CDC ポートが閉じている間は、LED 由来の
-設定書き込みに限り、既存の custom-settings API で Studio 通知を抑えます。
-値の更新と flash 保存は続き、再接続した client は現在値を読み取れます。
-flash への保存は最後のメモリー書き込みから 3 秒後です。
-client からの編集は従来どおり即時に反映します。
+**キー操作は BLE / USB とも、使用中の設定と desired getter へ即時に反映します。**
+standalone は controller へ直ちに反映し、split の表示は左右共通の将来の予約時刻に
+切り替えます。予約中の連続操作も、次のキー処理では最新の desired 値を使います。
+USB は最後の操作から 300 ms 後に Studio 通知の送出要求をまとめます。
+通知時には設定の現在値を読み、古い保留値で後からの client 編集を上書きしません。
+flash への保存は最後のメモリー書き込みから 3 秒後に、registry の現在値を
+一体として保存します。client からの編集も desired 値へ即時に反映します。メモリー書き込みが
+失敗した場合は controller への要求に戻り、standalone / split の表示方針に従います。
+その失敗値の registry 保留書き込みや保存予約は残しません。
+
+USB キー操作は Studio 通知だけを遅らせ、core の observer には直ちに通知します。
+保存時は USB の Studio CDC ポートが閉じている間だけ Studio 通知を抑えます。
+現行 custom-settings は呼び出し単位の quiet event を使い、他の同時書き込みには
+通知を残します。互換性を維持する旧 c6a7 依存先は従来の global suppression を
+使うため、同時通知を抑制し得る既存の制約が残ります。再接続した client は現在値を
+読み取れます。event dispatch の成功は Studio キューや USB / BLE の配送確認ではありません。
 
 これらを登録するのは central だけです。peripheral には独自の設定は不要です。
 central に届いたもの(キー押下または client での編集)は、最終状態として peripheral
@@ -238,34 +254,40 @@ option が無効の場合(既定であり、upstream ZMK でのビルドもこ�
 
 ### split の接続
 
-split では、LED は何よりもまず状態表示です。左右とも同じ 3 段階を表示し、両者が
-実際に合意するまで、どちらもインジケーター表示を終えません。
+central を時刻の基準とし、LED 専用の論理時計を換算します。Zephyr 全体の時計は変更しません。
+左右は共通の将来時刻を予約し、同じ64bit epochから位相を計算します。packetを受信した瞬間には
+点灯状態を変更しません。設定値とgetterは操作直後に更新するため、連打や長押しの次の操作も
+最新の要求値から進みます。予約済み1件を固定し、その後の変更は最新値1件へまとめます。
 
 | 段階 | LED | 意味 |
 | --- | --- | --- |
-| waiting | 点滅(パターン 3 の形) | もう片方が見つからない |
-| linked | 常時点灯(パターン 0 の形) | 接続済みだが、状態はまだ合意していない |
-| synced | 通常のパターン(既定は breathe (1)) | peripheral が表示内容を確認した |
+| WAITING | 固定周期の点滅 | peer未接続 |
+| LINKED | 常時点灯 | 有効な点灯予約がまだ成立していない |
+| RUNNING_UNCONFIRMED | 予約した通常パターン | 実行中だが完了確認が未確定 |
+| SYNCED | 予約した通常パターン | 必要な完了確認があり、現在の時計精度も条件内 |
+| COASTING | 最後に成功した表示を自走 | 完了確認済みだが、現在の位相精度は保証範囲外 |
+| COASTING_UNCONFIRMED | 最後に成功した表示を自走 | 位相精度と必要な完了確認が未確定 |
 
-接続から 5 秒後(central が peripheral の relay characteristic を検出し終える時間です。
-それより前の書き込みは、ログが 1 行出るだけで transport に捨てられます)、central は
-状態全体(パターン、明るさ、速度、advertising flag、現在の曲線のどこまで進んだか)を
-載せた `led` packet を送ります。これにより peripheral はアニメーションを最初から
-やり直すのではなく、位相を合わせて引き継ぎます。
+接続5秒後から、version4の `ls4` による4メッセージの時刻交換を始めます。両側のboot/link識別子、
+sequence、予約状態全体を照合し、古い応答で新しい予約を確認したことにはしません。RTT上限80ms、
+モデル上の誤差上限50ms、時刻情報の有効期間8秒を設け、将来の適用時刻と実際の完了時点で検査します。
+予約は1000+2RTTms先です。これらはsoftware上の受理条件で、実機で測った左右の発光誤差ではありません。
 
-peripheral は、現在表示しているパターンを示す `lea` packet で応答します。この確認応答
-によって「synced」は推測ではなく観測された事実になり、左右両方のインジケーター表示が
-解除されます。接続時の送信は、0.5 秒ずつ応答を待ちながら最大 5 回まで行い、それでも
-応答がなければ諦めて常時点灯のままにします。これにより、一度も接続できなかった
-組み合わせと、接続したが合意できなかった組み合わせを見分けられます。relay event の
-名前は NUL を含めて 4 byte までなので、どちらも 3 文字です。
+時計は起動・再接続・休止復帰と、設定や必要なactivity/advertising表示の変更時だけ合わせます。
+有効な確認済み時計は将来の適用時刻まで条件を満たす場合だけ再利用し、定期更新はしません。
+1回の処理は時刻probeを合計5回、将来予約を3件までとし、各予約の送信は最大3回です。
+処理中の連続編集で予算を補充せず、失敗後も同じ要求のまま無限に再送しません。
+新しい最新要求は、前の処理の終了時に1回の有限な処理へ引き継げます。
 
-その後の状態変化は 1 件につき 1 packet を送り、20 ms の間にまとめます。設定の適用や
-slider のドラッグは、連続した送信ではなく 1 回の無線 event になります。
+時計精度の期限が切れても、最後に成功した表示はCOASTINGとして自走します。長い放置中の
+左右の位相ずれは許容し、次の変更で時計が古ければ、共通の将来時刻から位相を再開します。
+新しい出力に失敗した場合は直前に成功した表示を再設定しますが、実際の発光復元は未測定です。
+ACK損失下で左右同時・全か無かの配信は保証しません。定期更新するversion3/ls3以前とは
+互換性がないため、左右ともversion4のfirmwareが必要です。
 
-behavior は `BEHAVIOR_LOCALITY_CENTRAL` です。peripheral が自分で behavior をもう一度
-呼び出すのではなく、central が状態を所有して結果を mirror します。両方のファームウェア
-image に module と同じ behavior node を含めてください。
+behaviorは引き続き `BEHAVIOR_LOCALITY_CENTRAL` です。両側にmoduleと同じbehavior nodeを含めてください。
+時刻計算、sessionの切替、PM、メッセージとstackの費用、実機確認の境界は
+[詳細な同期仕様](SCHEDULED_SYNC.md)に記載しています。
 
 ### host との接続
 
@@ -273,7 +295,8 @@ host のない central は、パターンの代わりに 70% で 300 ms 点灯�
 消灯する表示を行います。速度設定には従わない固定の周期です。接続状態を示すものなので、
 パターンの設定にかかわらず見分けられる必要があるからです。パターンを選択すると、
 次に接続状態が変わるまでこの表示は解除されます。`led.adv_blink` を無効にすると常に
-解除されます。peripheral は自分の endpoint を持たないため、この表示は出ません。
+解除されます。peripheral は独自のendpointを判断せず、centralが予約したadvertising flagを
+他の共通表示フィールドと一緒に表示します。
 
 ## スケジューリングと消費電力
 
@@ -284,59 +307,107 @@ host のない central は、パターンの代わりに 70% で 300 ms 点灯�
 です。実際に描画している間だけ 40 ms 間隔で行います。
 
 アニメーションは `zmk_activity_state_changed` にも従います。ZMK がキーボードを idle と
-報告すると LED は消灯し、次の押下まで何も予約しません。使用中の `idle_off` を無効に
-すると別の方針になり、電源が入っている間アニメーションを続けます。これは、見た目だけ
-でなく実際に電池を消費するこの module で唯一の設定です。判定に使う 2 つの入力は
+報告すると LED は消灯し、次の押下までアニメーションの再描画を止めます。splitの次の有効な表示変更も予約時刻で行います。精度の期限切れだけではLED通信を行いません。使用中の `idle_off` を無効に
+すると別の方針になり、電源が入っている間アニメーションを続けます。この場合はアニメーションの処理が続きます。idle_offが無効なら、activityの変化だけではLED同期を始めません。判定に使う 2 つの入力は
 保持せずに毎回読み直すため、キーボードが *すでに* idle のときに無効にすると、キーを
-待たずにすぐ点灯します。
+待たずに点灯を要求します。splitでは将来の共通予約時刻に適用します。
 
-**split では、activity の判断は central が行います。** 左右は同じキー押下を見ている
-わけではありません。ZMK は `zmk_position_state_changed` から activity を更新しますが、
-peripheral の押下は左右両方に届く(自身にはローカルに、central には split 経由で)一方、
-central の押下は central にしか届きません。そのため peripheral が自分の activity だけで
-判断すると、もう片方で入力している間に idle timeout で消灯し、そのままになります。
-そこで mirror は flag と一緒に central の activity を運び、peripheral はどちらか一方の
-判断で十分とみなします。central の判断は peripheral に届かない入力を補い、peripheral
-自身の判断は relay を待たずに自分のキーを反映し、問い合わせる central がない場合も
-補います。
-
-その代償は idle の 1 周期あたり 2 通の追加メッセージです。どちらもパターンの位相を
-運ぶため、復帰時には起きていることだけでなく曲線の位置も再び合意します。
+**splitの通常表示のactivityはcentralが判断します。** centralは左右のpositionを見て、
+idle方針とactivityを点灯状態と一緒に予約します。復帰時の位相も共通の将来時刻から開始します。
+有効な予約がないときの診断表示はlocal activityに従います。PMのlocal消灯は別のfence/drain手順で行います。
 
 どちらのインジケーターも、blink 系パターンで使う 3-5% の下限ではなく、真に 0 の
 消灯区間を使います。nRF では、Zephyr の PWM driver が PWM peripheral を停止し、
 必要な高周波クロックを解放するのは、すべての channel がちょうど 0% か 100% の duty の
 ときだけです。暗い下限を残すと、何かがおかしいときに出て長く続くかもしれない状態の間、
 そのクロックが動き続けます。advertising インジケーターの *点灯* 区間は 70% のままです。
-ここでは LED 自身の電流が支配的で、暗くするほうが消費電力を抑えられるからです。
+PWM とクロックの負荷を含む電流は、対象基板での測定が必要です。
 
-すべての再描画と mirror は system work queue ではなく
-`zmk_workqueue_lowprio_work_q()` で実行します。ZMK は advertising の再開処理を system
-work queue に投入するため、アニメーションが、host 切断後にキーボードを再び見つけられる
-ようにする処理の前に並ぶべきではありません。また、Zephyr は呼び出し元がその queue の
-とき ATT TX buffer の確保で待たないため、そこから投入した split の書き込みは buffer
-pool が一時的に空になるたびに失敗します。
+standaloneの再描画とsplit送信はZMKの低優先度queueを使います。splitの再描画と予約実行は、
+同じ低優先度の専用1536byte queueに直列化します。送信側のcore処理が待っても描画queueを占有しません。
+system queueのadvertising再開処理とも分かれます。実行時stack使用量、発光時刻、消費電力は
+ビルド結果から保証するものではありません。
 
 ## 互換性とテスト
 
-基本の behavior は非 split 構成なら upstream ZMK の `main` でビルドできます。
-split 同期には DYA のリレーイベント API が必要で、upstream split には存在しません。任意の Studio 設定連携には、
-追加で `cormoran/zmk` の `main+dya` と `zmk-feature-custom-settings` が必要です。option を
-無効にすればその依存はなくなります。
+| Core と役割 | 対応範囲 |
+| --- | --- |
+| Stock ZMK、standalone | 基本 behavior と任意の電池補正 |
+| DYA、standalone | 基本 behavior と任意の custom-settings / Studio 連携 |
+| DYA、split central と peripheral 1 台 | DYA relay API による予約同期。設定連携は central 側で任意 |
+| Stock ZMK、split | 対象外。必要な DYA relay API がありません |
 
-CI は両方の構成で nRF52840 向けの実際の ZMK ファームウェア fixture をビルドします。
-3 つの behavior がすべてリンクされていること、DYA の設定 namespace と 9 個すべてのキーが DYA ビルドに
-だけ含まれること、PWM LED の所有者が 1 つになるよう `CONFIG_ZMK_BACKLIGHT` が無効の
-ままであることを確認します。
+互換性の CI は upstream の `main` と `cormoran/zmk` の `main+dya` を追跡します。
+既定の DYA fixture は旧 registry を固定し、現行 registry は明示的な追加の override
+として検証します。固定した offline 依存関係とコマンドは[テストガイド](tests/README.md)にあります。
 
-host 回帰テストは `bash ./tests/run-host-docker.sh` で最適化ビルドと ASan/UBSan の
-両方を実行します。連続変更で各設定の最新値だけが残ること、設定項目間の独立性、
-送信中の更新、送信失敗後の再試行、値の反映、USB ポート開閉の判定を確認します。
-決定的な 10 万ステップの連続操作も再生し、小さな `usb_pending.h` helper の行・
-分岐カバレッジ 100% を CI の条件にします。Zephyr module 全体の 100% を意味しません。
+CI は stock standalone、DYA standalone、DYA central、DYA peripheral の
+4 つの nRF52840 fixture をビルドします。また、固定した Zephyr の実カーネル上で
+relay / PWM を制御した両役割の native 検証を行います。firmware 検証では
+3 つの behavior と、設定連携が有効な場合の namespace・9 個のキーがリンクされること、PWM LED の所有者が 1 つになるよう `CONFIG_ZMK_BACKLIGHT` が無効の
+ままであること、ZMK の電池報告が残量 % の取得モードで、リンクされた電池ラッパーを
+`chosen` の `zmk,battery` として読むことを確認します。
+
+LED 点灯で電池 ADC が低く出る基板向けに、任意の
+`zmk,led-battery-adc-offset` センサを追加できます。`source-sensor` に
+`zmk,battery-voltage-divider`(`<&vbatt>` など)、`full-duty-offset-mv = <50>` を
+設定し、`chosen` の `zmk,battery` をこのセンサへ向けます。分圧センサの取得後、
+その時点で記録されている、直近の成功したローカル LED 書き込みの duty に応じて
+0～50 mV を加算します。PWM の変化と ADC の取得時点は一括して記録されないため、
+これは負荷補正の推定値です。取得中に点灯状態が変わると、記録した duty と ADC が
+測った負荷が異なる場合があります。電気的な精度は実機での測定が必要です。
+記録された duty が 0 の場合は加算しません。ZMK が報告するのは残量 % で、
+分圧センサはそれを補正前の電圧から
+計算するため、このセンサは補正後の電圧から分圧センサと同じ方法で % を計算し直します。
+DYA フォークでは同じノードの `mv-to-pct-thresholds` で補間し、しきい値を持たない
+upstream ZMK の分圧センサでは ZMK の固定のリチウムイオン直線(3450 mV で 0%、
+4200 mV で 100%)を使います。`SENSOR_CHAN_GAUGE_VOLTAGE` と
+`SENSOR_CHAN_GAUGE_STATE_OF_CHARGE` の両方を返します。BAS、split peripheral の
+残量、ディスプレイのすべてに補正後の値が届きます。補正は分圧抵抗値によるベースの
+固定較正に上乗せされます。50 mV は実測値に合わせて変更し、中間の明るさも実機で
+確認してください。% の変換は 2 方式とも 0～5 V の全 mV で ZMK 自身のコード(float の補間と
+リチウムイオン直線)と一致することを確認し、実際のコールバックは実物同様に gauge 以外の
+チャンネルを拒否するスタブに対して
+取得失敗・読み出し失敗・0/50/100% の場合を故障注入で試し、CI で行・分岐 100% を
+要求します。ハードウェア実測の代わりにはなりません。
+
+host 回帰テストは `bash ./tests/run-host-docker.sh` で ASan/UBSan を実行し、full mode では
+最適化・coverage の構成も保持します。設定の即時反映と項目間の独立性、後からの client 編集、
+通知処理中の更新、制御された dispatch 失敗と再試行、保存時の現在値維持、メモリー失敗と回復、
+USB ポート開閉を現行・旧 API の両方で確認します。元の入力順序を維持した決定的な
+10 万ステップの通知世代テストも再生し、小さな `usb_pending.h` helper の行・
+分岐カバレッジ 100% を CI の条件にします。host ハーネスは、controller・設定ブリッジ・
+電池・behavior の対象関数を確認します。18 種類のカーブ、BLE あり・なしの単体構成、
+split controller API も対象です。full mode は、小さな helper と対象 runtime 関数について、
+テストガイドに記載した行・分岐カバレッジの基準を適用します。実際の scheduled adapter と
+kernel の並行処理は native テストで別に確認します。devicetree からのインスタンス生成、
+relay の登録、設定の宣言は firmware fixture で確認します。
+
+現行のコマンド、置き換えた assertion の対応表、実機 acceptance の要件は
+[module 所有のテストガイド](tests/README.md)を参照してください。
+
 USB 向けの抑制策が対象にするのは、このモジュールから生じた LED 設定通知です。
 DYA 共通の RPC 送信部は変更しないため、別の Studio 通知元まで含めて送信バッファ
 満杯時の停止を防ぐ保証はありません。
+
+## split を ls3 から ls4 へ更新する
+
+1. 左右とも同じ module revision を選び、対応する DYA core で両方の firmware を
+   ビルドします。再現できるよう、利用側の manifest にはその revision を固定します。
+2. 左右を一組として更新します。Version4 / `ls4` は version3 / `ls3` 以前の相手を
+   意図的に受け付けないため、一時的に異なる版が混ざると通常表示を同期できません。
+   古い wire 形式への自動 fallback はありません。
+3. 再接続し、起動時、連続した設定操作、idle / wake、片側だけの suspend / resume を
+   確認します。この wire 更新のために LED キー・設定を移行したり、設定・bond を
+   リセットしたりする必要はありません。
+
+desired 設定は即時更新し、split の表示は将来の共通時刻に切り替えます。有効な変化が
+ない間は時計の期限後も COASTING として表示を続けるため、長時間の実際の位相一致は
+保証しません。有限回の回復処理と精度の条件は [SCHEDULED_SYNC.md](SCHEDULED_SYNC.md) を参照してください。
+
+release 前には、対象の実機・production firmware で split / BLE の配信、混雑・再接続、
+PWM 時刻、消費電力、USB / Studio の共存、reset / PM の保持を確認してください。
+host / native 検証やビルド成功は、これらの実機 acceptance の代わりにはなりません。
 
 ## License
 

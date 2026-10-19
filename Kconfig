@@ -4,6 +4,7 @@
 DT_COMPAT_ZMK_BEHAVIOR_LED_PATTERN := zmk,behavior-led-pattern
 DT_COMPAT_ZMK_BEHAVIOR_LED_BRIGHTNESS := zmk,behavior-led-brightness
 DT_COMPAT_ZMK_BEHAVIOR_LED_SPEED := zmk,behavior-led-speed
+DT_COMPAT_ZMK_LED_BATTERY_ADC_OFFSET := zmk,led-battery-adc-offset
 
 config ZMK_LED_PATTERNS
     bool "LED patterns"
@@ -15,13 +16,12 @@ config ZMK_LED_PATTERNS
     # enabled as well, backlight.c writes the same LED at boot and &bl becomes a
     # second owner of it.
     select LED
-    # A split mirror is sent as one compact state event after the central has
-    # applied a key command. It deliberately does not invoke a behavior on the
-    # peripheral: that old GLOBAL behavior route reset this hardware pair.
+    # Split settings reserve a future common apply through compact relay events.
+    # Receipt does not invoke a behavior or change the peripheral output.
     select ZMK_SPLIT_RELAY_EVENT if ZMK_SPLIT
-    # Every redraw and every split mirror runs here rather than on the system
-    # work queue, which is also where ZMK posts update_advertising_work: an
-    # animation must not sit in front of the item that makes the keyboard
+    # Standalone redraw and split TX use the low-priority queue. Split render
+    # and reserved apply use their separate serialized queue. Neither should
+    # sit in front of system update_advertising_work that makes the keyboard
     # findable again after a host disconnect.
     select ZMK_LOW_PRIORITY_WORK_QUEUE
     help
@@ -37,6 +37,16 @@ config ZMK_LED_PATTERNS
       state to the peripheral through ZMK's relay-event transport.
 
 if ZMK_LED_PATTERNS
+
+config ZMK_LED_PATTERNS_BATTERY_ADC_OFFSET
+    bool "Compensate battery ADC sag from the locally applied LED brightness"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_LED_BATTERY_ADC_OFFSET))
+    depends on SENSOR
+    help
+      Enables an optional battery sensor wrapper. Its devicetree node points
+      at the board's raw battery sensor and supplies the measured voltage sag
+      at full LED duty. The wrapper adds a proportional correction to voltage
+      samples, without modifying upstream ZMK's battery reporting code.
 
 config ZMK_LED_PATTERNS_CUSTOM_SETTINGS
     bool "Publish the LED state through zmk-feature-custom-settings"
@@ -84,3 +94,11 @@ config ZMK_LED_PATTERNS_PM_LATE_INIT_PRIORITY
       (LED_INIT_PRIORITY).
 
 endif # ZMK_LED_PATTERNS
+
+config ZMK_LED_PATTERNS_LOG_LEVEL
+    int "zmk-led-patterns log level (0 off, 1 error, 2 warning, 3 info, 4 debug)"
+    range 0 4
+    default 3
+    help
+      Logs contain operational state and numeric diagnostics, never input
+      contents, user labels, peer addresses or authentication material.

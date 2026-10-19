@@ -1,0 +1,25 @@
+description: |
+  Battery sensor with LED-load ADC voltage compensation.
+
+  Wraps a zmk,battery-voltage-divider. Each sample reads the divider's
+  voltage, adds full-duty-offset-mv scaled by the LED duty at that moment, and
+  maps the result to a state of charge the way the divider does: over its
+  mv-to-pct-thresholds where it has them (the DYA fork), with ZMK's fixed
+  lithium-ion line where it does not (upstream). Select this node as
+  zmk,battery.
+
+compatible: "zmk,led-battery-adc-offset"
+
+include: base.yaml
+
+properties:
+  source-sensor:
+    type: phandle
+    required: true
+    description: >-
+      The uncompensated battery sensor: a zmk,battery-voltage-divider, or any
+      sensor serving the same gauge channels
+  full-duty-offset-mv:
+    type: int
+    required: true
+    description: Measured ADC voltage sag in millivolts at 100 percent LED duty

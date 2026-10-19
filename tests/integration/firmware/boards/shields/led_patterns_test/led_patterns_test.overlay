@@ -35,6 +35,13 @@
         zmk,backlight = &led_patterns_test_led;
         zmk,kscan = &led_patterns_test_kscan;
         zmk,physical-layout = &led_patterns_test_layout;
+        zmk,battery = &led_patterns_test_battery;
+    };
+
+    led_patterns_test_battery: led_patterns_test_battery {
+        compatible = "zmk,led-battery-adc-offset";
+        source-sensor = <&vbatt>;
+        full-duty-offset-mv = <50>;
     };
 
     led_patterns_test_kscan: led_patterns_test_kscan {
