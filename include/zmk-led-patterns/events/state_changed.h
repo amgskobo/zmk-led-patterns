@@ -6,7 +6,9 @@
 #include <stdint.h>
 #include <zmk/event_manager.h>
 
-/* The applied values, not the behavior command or a split transport event. */
+/* Accepted desired values. A split's visible reservation may still be pending.
+ * led_pattern_applied_brightness() separately reports the last local PWM level.
+ * Rendering a reservation never publishes an older desired-state event. */
 struct zmk_led_pattern_state_changed {
     uint8_t pattern;
     uint8_t brightness;

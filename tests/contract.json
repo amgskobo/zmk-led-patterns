@@ -1,0 +1,157 @@
+{
+  "schema": 1,
+  "host": [
+    "bash",
+    "tests/run-host-docker.sh"
+  ],
+  "contracts": [
+    {
+      "fixture": "tests/runtime/standalone_harness.c",
+      "asserts": "All eighteen curve levels, periods and holds; explicit SOS pulse/gap order and three-frame wrap; clock bounds, state clamps, activity, advertising, drawing failures, requests and power-off lifecycle Invalid public led_pattern_request selectors return before settings/state/events/driver writes."
+    },
+    {
+      "fixture": "tests/runtime/usb_only_harness.c",
+      "asserts": "USB-only builds never show the BLE advertising indicator"
+    },
+    {
+      "fixture": "tests/runtime/central_harness.c",
+      "asserts": "Scheduled controller role: immediate desired forwarding, status local time, visible snapshot/brightness/speed/idle/advertising, all18 exact phase/hold values beyond32-bit and atINT64_MAX, no render state events, driver failure and PM Invalid public led_pattern_request selectors neither forward to the adapter nor emit state notifications."
+    },
+    {
+      "fixture": "tests/runtime/peripheral_harness.c",
+      "asserts": "Scheduled controller role: immediate desired forwarding, status local time, visible snapshot/brightness/speed/idle/advertising, all18 exact phase/hold values beyond32-bit and atINT64_MAX, no render state events, driver failure and PM Invalid public led_pattern_request selectors neither forward to the adapter nor emit state notifications."
+    },
+    {
+      "fixture": "tests/runtime/brightness_behavior_harness.c",
+      "asserts": "Brightness percentages, step bounds, invalid commands and device-not-ready behavior"
+    },
+    {
+      "fixture": "tests/runtime/speed_behavior_harness.c",
+      "asserts": "Speed percentages, presets, step bounds, invalid commands and device-not-ready behavior"
+    },
+    {
+      "fixture": "tests/test_usb_pending.c",
+      "asserts": "Independent notification generations, dispatch race/retry bookkeeping, port-closed gates and the retained 100000-step generation input schedule; values now belong to the registry fixture"
+    },
+    {
+      "fixture": "tests/test_battery_adc_offset.c",
+      "asserts": "Duty scaling, millivolt conversion and saturation, threshold interpolation and stock fallback percentage boundaries"
+    },
+    {
+      "fixture": "tests/runtime/battery_harness.c",
+      "asserts": "Battery correction arithmetic"
+    },
+    {
+      "fixture": "tests/runtime/settings_harness.c",
+      "asserts": "Same scenarios through current and legacy registry APIs: immediate values, later client edits, independent fields, atomic delayed saves, failed MEMORY writes without dirty/notification state, recovery, endpoint changes, notification generations and controlled dispatch failure; no transport acknowledgement"
+    },
+    {
+      "fixture": "tests/runtime/settings_presentation_harness.c",
+      "asserts": "Actual bridge read/apply callback plus actual adapter desired setters/publish and production engine, with controlled registry/kernel and thin controller forwarding: switching transport with several changed fields admits one complete first immutable reservation, desired updates immediately, old visible state remains until due common edge, no-op stays silent, clamping and independent setters preserve fields. No real kernel/radio/PWM claim."
+    },
+    {
+      "fixture": "tests/runtime/settings_ble_only_harness.c",
+      "asserts": "BLE-only builds select BLE settings and do not gate persistence on a USB Studio port"
+    },
+    {
+      "fixture": "tests/native/run_scheduled.sh",
+      "asserts": "--test-admission rejects existing directory, dangling symlink and directory symlink evidence outputs before dependency/build preparation, retains sentinel/hash and missing-target checks; default quick/full invoke it through native/run.sh and bound the complete admission entry to ten seconds. This compatibility alias forwards arguments, not another suite."
+    },
+    {
+      "fixture": "tests/integration/test_registration.py",
+      "asserts": "Exact defined device/init/PM objects for both registrations; missing members, suffix lookalikes, undefined symbols and plain strings reject"
+    },
+    {
+      "fixture": "tests/test_led_sync_clock.c",
+      "asserts": "Pure production clock interval and checked conversion; RTT/exchange/quality/expiry/quantization/future aging; signed and64-bit extremes;100% line/branch gate and identified controls"
+    },
+    {
+      "fixture": "tests/test_led_sync_protocol.c",
+      "asserts": "Two production engines,13 named scheduled state/session/clock/recovery families; receipt cannot apply, exact ACK, immutable latest-next, malformed/replay/same-ms challenge, unilateral rotation, completion late/quality/stage,30s continuous changes with bounded foreground fit/traffic; active expiry coasts and failed unchanged transactions exhaust silently"
+    },
+    {
+      "fixture": "tests/test_led_sync_wire.c",
+      "asserts": "Explicit56-byte version4 schema: expected LE byte vectors, complete32/64-bit identities/timestamps and full-state ACK,18x101x16 packing combinations, speed boundaries, all kinds/statuses, exact length/null/output clearing and malformed version/range/unused-tail rejection; explicit previous version3 rejection and REQUEST7 zero-body canonicality"
+    },
+    {
+      "fixture": "tests/test_led_sync_traffic.c",
+      "asserts": "Two actual engines with fixed10ms queues/10000ms offset and unchanged60s idle/30s edits/45s ACKloss+reconnect inputs: immutable recorded state, independent latest-input oracle, exact common phase, no early receipt apply, each due output within40ms, ordered reservation/state/recovery and peer final equality"
+    },
+    {
+      "fixture": "tests/traffic_compare.py",
+      "asserts": "Same-input baseline periodic3/candidate4 three-repeat byte identity and individual hashes; parse the reference pair once for independent per-reservation ordered state/phase/deadline/output and recovery checks, explicit seven-message quiet startup, fewer packets and per-kind totals; intentionally different policy traces are never justified by totals alone"
+    },
+    {
+      "fixture": "tests/wire_negative.py",
+      "asserts": "Six exact production codec mutations: lost flag, noncanonical tail admission, timestamp truncation, endian reversal, old-version admission and matching encoder/decoder t2/t3 field swap; independent complete literal vectors kill co-swap even with roundtrip preserved; compiled unchanged control passes3x, each mutant fails unchanged assertions3x; source unchanged. run-wire.sh is a compatibility alias. Actual encoder/decoder mutations replace the old two fixture-byte injections without removing their roundtrip or malformed-tail assertions."
+    },
+    {
+      "fixture": "tests/protocol_negative.py",
+      "asserts": "Eight exact identified production-expression mutations; unchanged controlPASS3x; each mutant compiles and fails same assertions3x; production source remains unchanged"
+    },
+    {
+      "fixture": "tests/native/scheduled_harness.c",
+      "asserts": "Actual emitted production adapter/controller and codec with real Zephyr queues/mutex/cancel. Central17/peripheral16 scenarios run each unchanged binary3times (99completions): retained blockedTX/render independence, due-before-old draw, frozen mapping, PMfence/zero/drain/resume, independent fields, rejectedRX/codec and own/peer completion; quiet69s/no worker spin, animation/noTX,300s999/1000coast/future rebase, finite exhaustion/rearm, effective activity, actual100Hz20ms quantization, rollback/replay API order; direct invalid adapter selectors have no side effects, disconnect retires actual timer while preserving redraw, new request survives blocked oldrelay. Parked K_FOREVER DELAYED descriptor may remain with timeout remaining0; queued/running invocation is not removed by reschedule. Relay/PWM remain controlled. Thirteen control modes/eighteen role variants each repeat3expected assertion failures; no compile failure accepted."
+    },
+    {
+      "fixture": "tests/runtime/settings_interleaving_harness.c",
+      "asserts": "Actual bridge callbacks with pthreadmutex and deterministic USB/BLE writer overlap; latest registry/desired value; compile-selected no-lock control reproduces obsolete callback ordering"
+    },
+    {
+      "fixture": "tests/test_led_sync_on_demand.c",
+      "asserts": "Production engine/codec scenarios: hour quiet/fresh reuse, long-coast backwards future reset, finite5PROBE and3plan exhaustion, prior-view recovery, bounded200ms queued reset confirmation, peripheral REQUEST dedup, latest-once promotion/A-B-A silence, delayed/duplicate/obsolete successful accounting, immediate invalid-session COASTING before draw, unacked candidate never funds promotion. A genuinely newer peripheral resume hint retains unserviced demand across the last unresolved old attempt or old-plan completion. Fresh transaction begin or an actual post-hint PROBE consumes it; no guarantee of five extra attempts per hint, duplicate renewal or passive refill after a failed serviced burst. A dedup-approved newer REQUEST fences fresh completion to a strictly newer sequence: old pending success stays historical/COASTING and old completion after a post-hint PROBE cannot clear fresh intent. Rollback preserves the fence; link rotation clears it without overflow. A historical pre-resume confirmation cannot suppress newer latest intent after hint service. REQUEST during installed/uncompleted output preserves real success/failure/rollback and future recovery. New-central FIT invalidation retires only the obsolete uncompleted output on return: restore last own-successful view invalid/COASTING or request status redraw without a prior view; keep new pending reservation, fit/session, desired, budgets and queued new-session ACCEPTED ACK; emit no old ACK under the new identity. Duplicate completed coasting output does not rearm replay, and link/PM teardown never resurrects a view."
+    },
+    {
+      "fixture": "tests/on_demand_negative.py",
+      "asserts": "Identified exact engine mutations against unchanged scenarios: periodic, infinite failed retry, oldfloor, no rollback, lostlatest, duplicate refill, REQUEST/FIT late stage, skipped wait, hint replay and unacknowledged candidate readiness; unchanged3PASS, each compiled mutant3expected failures"
+    },
+    {
+      "fixture": "tests/traffic_negative.py",
+      "asserts": "Four compiled exact engine faults (wrongvisible value, wrongphase, earlyconsume, delayededge) fail unchanged ordered traffic assertions3x; unchanged3PASS, raw order retained"
+    },
+    {
+      "fixture": "tests/test_traffic_compare.py",
+      "asserts": "Default quick/full actual comparator runs once for each positive/eight corrupted trace inputs: wrong apply/reserved intent, early/late/order, missing peer, wrong final and missing recovery even with adjusted summaries. Each input retains three byte-equal slots. Quick slots explicitly copy one sanitized engine output; full reuses one optimized binary3x. Separate CLI can validate3 real historical/current repeats."
+    },
+    {
+      "fixture": "tests/traffic_baseline.py",
+      "asserts": "Exact archived SHA-pinned periodic protocol/codec and unchangedclock admission only; no source-rewriting adapter or dependency patch"
+    },
+    {
+      "fixture": "tests/traffic_fixture.py",
+      "asserts": "SHA-admit the27,634-byte periodic3 output fixture and provenance; no historical algorithm copy. Three historical parser slots are explicit fixture copies, never claimed as binary reruns."
+    },
+    {
+      "fixture": "tests/test_integration_docker.py",
+      "asserts": "Real Bash wrapper with recording Docker: core/role validation and forwarding, read-only owner/current-registry/offline mounts, container-visible path rewriting, online/offline fresh result parents, offline networknone, existing/symlink rejection and Docker exit propagation; no actual firmware assertion supplied by the stub"
+    },
+    {
+      "fixture": "tests/test_integration_lifecycle.py",
+      "asserts": "Real integration entry with controlled west setup/build failures: explicit online outputs retained, existing output rejects before tools, raw failure exits preserved, temporary dependency workspace cleaned independently; real firmware validator remains separate Actual west manifest freeze output is retained before build; a freeze failure propagates its exit and cannot leave a successful identity file."
+    },
+    {
+      "fixture": "tests/native/controls.py",
+      "asserts": "Authoritative13-mode/18-role variant control selection through the unchanged native runner,3executions per binary. Retained evidence validation requires intended assertion target failure in each of54runs, complete17central/16peripheral scenario starts/outcomes, exact mode/role/compiler flags,14current-source hashes, unchanged emitted source and binary hashes, successful build and non-timeout assertion exit. Run orchestrates/validates; validate reads existing records without executing binaries. No external aggregator supplies missing assertions."
+    },
+    {
+      "fixture": "tests/native/test_controls.py",
+      "asserts": "Synthetic parser/recording-dispatcher scenarios withsubtests: correct complete record accepted; wrong target/unrelated assertion, timeout, missing binary/hash/repeat, generated/source hash drift/subsets, wrong pin/backend/mode/role/compiler flags, missing scenario and existing/symlink report reject. Local corruptions use one-mode fixtures; full-matrix and exact13mode dispatcher checks remain. Real exit41 propagation and setup/launch error reports preserve whether a runner started; fake ELF/log data never count as actualkernel or hardware runs."
+    },
+    {
+      "fixture": "tests/test_python_assertion_admission.py",
+      "asserts": "Actual public Python CLI processes reject environment and explicit -O optimization before output creation or compiler work for all five assertion-based entries. Recording compiler with harmless zero-exit programs reproduces optimized false PASS and verifies ordinary mutation runners reject survivors. Synthetic validator evidence only, not C mutation/kernel/hardware execution. Four mutation entries must also reject synthetic nonassertion SIGABRT; positive canonical C diagnostic and wrong-signal controls test the shared result boundary."
+    },
+    {
+      "fixture": "tests/mutation_result.py",
+      "asserts": "Shared POSIX SDK C assertion result rule for all four host mutation runners: SIGABRT plus a qualified C assertion diagnostic is required; arbitrary aborts are not killed mutations, and full raw stderr is retained."
+    }
+  ],
+  "limits": "Host/native do not establish physical oscillator drift, BLE delivery/fragment timing/congestion, PWM electrical edges, power, stack high-water or end-to-end HID.50ms clock quality and1000ppm aging are software admission assumptions. In-flight relay cannot be recalled and ACKloss is not atomic delivery. Current split supports onepeer; bootnonce identity is probabilistic, not security. Newprotocol coverage is measured, not claimed exhaustive. Dispatch is not Studio queue admission; originalc6a7 retains inherited global suppression gap. Coasting deliberately permits unbounded phase drift until a future event-driven reservation. Finite retries/rollback calls do not guarantee physical restoration or paired delivery. Retired boot history is bounded.",
+  "execution": {
+    "default": "quick: every behavioral engine/runtime scenario underASan/UBSan once plus all8 actual-comparator corrupted input cases; copied parser slots explicitly distinguished from binary reruns Includes synthetic optimized-Python admission and complete settings-presentation snapshot scenarios.",
+    "full": "Same quick scenarios plus optimized/coverage variants, retained100% helper/runtime/clock gates, measured protocol coverage,all retained protocol/codec/on-demand/ordered-traffic identified controls; comparator8 corrupted traces in default quick/full with pinned output fixture; standalone3-real-repeat historical/current entry retained; actual native and supported-core firmware entries separately for kernel/interface changes Defaultquick/full also run synthetic native-control parser/dispatcher scenarios; real13mode kernel control execution stays a separate canonical entry. The same optimized-Python admission and settings-presentation scenarios remain selected.",
+    "integration": "owner native/DTS/API guards when interfaces or kernel contracts change; not a prerequisite for pure host behavior",
+    "transport": "actual ordered USB/BLE/split/power/reset evidence; archived simulation is not a passing substitute"
+  },
+  "assertion_replacement": "tests/README.md contains the current receipt-phase, on-demand and USB coalescer replacement maps. Pre-change source/assertion hashes are retained in optional external historical archives; no private task path supplies current assertions. Expiry/periodic/infinite-retry expectations intentionally replaced by COASTING/finite foreground budgets. Literal codec vectors retained with version4/REQUEST; stage and demand-fit controls target current predicates. Other unique assertions retained."
+}

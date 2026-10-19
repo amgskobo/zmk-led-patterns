@@ -32,9 +32,37 @@ static bool on_ramp(uint8_t pattern, int64_t t) {
            (pattern == LED_PATTERN_FADE_BLINK && t % 1200 < 300);
 }
 
+/* The public SOS shape is ... --- ... at a 100 ms Morse unit. Preserve
+ * the existing three-unit letter gaps and seven-unit repeat gap. */
+static void test_sos(void) {
+    static const uint32_t durations[] = {
+        100, 100, 100, 100, 100, 300,
+        300, 100, 300, 100, 300, 300,
+        100, 100, 100, 100, 100, 700,
+    };
+
+    /* This instant is inside the first long pulse, not an inter-pulse gap. */
+    assert(pattern_sample_at(LED_PATTERN_SOS, 900).brightness == 100);
+
+    int64_t elapsed = 0;
+    for (uint32_t cycle = 0; cycle < 3; cycle++) {
+        for (size_t segment = 0; segment < ARRAY_SIZE(durations); segment++) {
+            const uint8_t expected = (segment % 2 == 0) ? 100 : 3;
+            for (uint32_t offset = 0; offset < durations[segment]; offset++) {
+                const struct pattern_sample sample =
+                    pattern_sample_at(LED_PATTERN_SOS, elapsed + offset);
+                assert(sample.brightness == expected);
+                assert(sample.hold_ms == durations[segment] - offset);
+            }
+            elapsed += durations[segment];
+        }
+        assert(elapsed == (int64_t)(cycle + 1) * 3400);
+    }
+}
+
 static void test_curves(void) {
     static const uint32_t periods[LED_PATTERN_COUNT] = {
-        0, 2000, 1200, 1000, 300, 1500, 2800, 1080, 1800,
+        0, 2000, 1200, 1000, 300, 1500, 3400, 1080, 1800,
         2200, 16000, 200, 1600, 1200, 1050, 2500, 1320, 1200,
     };
 
@@ -281,6 +309,33 @@ static void test_state_api(void) {
 }
 
 static void test_requests(void) {
+    /* Invalid public selectors must not reach settings or direct fallback. */
+    static const enum led_pattern_field invalid_fields[] = {
+        (enum led_pattern_field)-1, (enum led_pattern_field)3, (enum led_pattern_field)INT32_MAX,
+    };
+    struct led_pattern_state before_invalid;
+    led_pattern_get_state(&before_invalid);
+    const uint8_t brightness_before_invalid = led_pattern_get_brightness();
+    const int stores_before_invalid = settings_stores;
+    const int events_before_invalid = state_events;
+    const int writes_before_invalid = led_writes;
+    for (unsigned i = 0; i < ARRAY_SIZE(invalid_fields); ++i) {
+        settings_store_result = 0;
+        led_pattern_request(invalid_fields[i], 123);
+        assert(settings_stores == stores_before_invalid);
+        settings_store_result = -EINVAL;
+        led_pattern_request(invalid_fields[i], 321);
+        struct led_pattern_state after_invalid;
+        led_pattern_get_state(&after_invalid);
+        assert(after_invalid.pattern == before_invalid.pattern &&
+               after_invalid.speed == before_invalid.speed &&
+               after_invalid.advertising_indicator == before_invalid.advertising_indicator &&
+               after_invalid.idle_off == before_invalid.idle_off);
+        assert(led_pattern_get_brightness() == brightness_before_invalid);
+        assert(settings_stores == stores_before_invalid && state_events == events_before_invalid &&
+               led_writes == writes_before_invalid);
+    }
+
     /* With settings, a stored request reaches the LED through the settings. */
     settings_store_result = 0;
     led_pattern_request(LED_PATTERN_FIELD_PATTERN, 4);
@@ -305,6 +360,10 @@ static void test_requests(void) {
     assert(speed_percent == 150 && active_pattern == LED_PATTERN_TRIPLE_FLASH);
     led_pattern_request(LED_PATTERN_FIELD_BRIGHTNESS, 55);
     assert(brightness_percent == 55);
+    settings_store_result = -EIO;
+    led_pattern_request(LED_PATTERN_FIELD_BRIGHTNESS, 30);
+    assert(brightness_percent == 30); /* Failed immediate USB/BLE memory store fallback. */
+    settings_store_result = -EINVAL;
 
     /* &led_pattern: a number, a step either way (wrapping), or a warning. */
     assert(press(3) == ZMK_BEHAVIOR_OPAQUE && active_pattern == 3);
@@ -329,6 +388,21 @@ static void test_requests(void) {
     assert(on_pattern_released(&binding, (struct zmk_behavior_binding_event){0}) ==
            ZMK_BEHAVIOR_OPAQUE);
     led_pattern_set_brightness(100);
+}
+
+static void test_complete_presentation(void) {
+    struct led_pattern_state state = {LED_PATTERN_STEADY, 150, false, false};
+    const int before = state_events;
+    led_pattern_set_presentation(&state, 37);
+    assert(active_pattern == LED_PATTERN_STEADY && speed_percent == 150 && brightness_percent == 37);
+    assert(!idle_off && !advertising_indicator && state_events == before + 1);
+    assert(last_state_event.brightness == 37 && last_state_event.speed == 150);
+    led_pattern_set_presentation(&state, 37);
+    assert(state_events == before + 1);
+    led_pattern_set_presentation(&state, UINT8_MAX);
+    assert(brightness_percent == 100 && state_events == before + 2);
+    led_pattern_set_state(&state);
+    assert(brightness_percent == 100 && state_events == before + 2);
 }
 
 static void test_power_off(void) {
@@ -359,6 +433,7 @@ static void test_power_off(void) {
 }
 
 int main(void) {
+    test_sos();
     test_curves();
     test_clock();
     test_before_ready();
@@ -367,6 +442,7 @@ int main(void) {
     test_activity();
     test_state_api();
     test_requests();
+    test_complete_presentation();
     test_power_off();
     puts("led pattern (standalone): PASS");
     return 0;

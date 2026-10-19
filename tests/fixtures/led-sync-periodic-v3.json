@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "role": "Fixed historical output input only; no old algorithm or dependency copy.",
+  "wire_version": 3,
+  "trace_sha256": "62b77f3fb4ded9402b1f682799cc2bc40d065cb5036a2154ab6322c43cbf0703",
+  "trace_bytes": 27634,
+  "source_headers": {
+    "led_sync_protocol.h": "3bd90cbd4e8bd2d70b4c189daebc50d616997d87b29d588a89a58c41972a7213",
+    "led_sync_wire.h": "8386d62a24e4aaaa561451fc48638ae00af4803076b52781f93f80be5e752ea5",
+    "led_sync_clock.h": "59b2f28f39498d73a5a4ecc6b31fa51d39337afd536ebea875a5b55fd55bb9ce"
+  },
+  "fixture_sha256": "2e071ef1c5626a336d2749bdbeef3cee1b981f935441249506e27afa5b55fd47",
+  "command": "bash tests/run-traffic.sh FRESH_OUTPUT baseline56 EXACT_PINNED_HEADERS",
+  "inputs": "10ms controlled queues,10000ms peer offset;60s unchanged,30s edits,45s ACK loss10..18s/reconnect18..20s.",
+  "actual_historical_repeats": 3,
+  "note": "Default tests copy this immutable input into three slots for parser sensitivity, not three new historical binary executions. Historical periodic baseline retains explicit peer rejection under lost FIT_ACK; current candidate must complete each live common plan on both roles."
+}

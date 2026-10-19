@@ -68,7 +68,7 @@ int main(void) {
     assert(led_pattern_battery_corrected_mv(65, 535000, 1) == 65535);
     assert(led_pattern_battery_corrected_mv(INT32_MAX, 999999, 1000) == 65535);
 
-    /* The divider binding's default, which akkb46 and most boards use. */
+    /* The divider binding's default. */
     const int16_t lipo[] = {3450, 4200};
     assert(led_pattern_battery_mv_to_pct(3449, lipo, 2) == 0);
     assert(led_pattern_battery_mv_to_pct(3450, lipo, 2) == 0);

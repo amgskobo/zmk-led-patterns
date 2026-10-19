@@ -20,7 +20,7 @@
  * changing nothing.
  *
  * A BLE keymap binding writes the live setting immediately. USB key presses
- * apply to the LED immediately but coalesce their setting writes: a burst of
+ * commit their setting immediately but coalesce Studio notifications: a burst of
  * Studio notifications can otherwise fill the USB transport and stall input.
  * The final value reaches Studio after the short quiet interval below.
  *
@@ -30,6 +30,8 @@
  */
 
 #define DT_DRV_COMPAT zmk_behavior_led_pattern
+
+#include <string.h>
 
 #include <zephyr/devicetree.h>
 #include <zephyr/device.h>
@@ -50,7 +52,10 @@
 #include <zmk-led-patterns/led_pattern.h>
 #include "usb_pending.h"
 
-LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
+#ifndef CONFIG_ZMK_LED_PATTERNS_LOG_LEVEL
+#define CONFIG_ZMK_LED_PATTERNS_LOG_LEVEL 3
+#endif
+LOG_MODULE_REGISTER(zmk_led_patterns_behavior_led_pattern_custom_settings, CONFIG_ZMK_LED_PATTERNS_LOG_LEVEL);
 
 static bool led_patterns_namespace_handler(const zmk_custom_CallRequest *request,
                                            pb_callback_t *encode_response);
@@ -198,18 +203,11 @@ static const struct transport_settings *active_transport(void) {
     return &ble_transport;
 }
 
-/* USB key repeats can outpace Studio's notification transport. Keep only the
- * latest value per field until the keys have been quiet for a moment. This
- * lock protects only these small snapshots, never an RPC or a flash write. */
+/* Only notifications are deferred. The registry is updated on the key thread,
+ * so a later Studio edit can never be overwritten by an older queued value. */
 #define LED_PATTERN_USB_COALESCE_MS 300
 K_MUTEX_DEFINE(usb_pending_mutex);
 static struct led_pattern_usb_pending usb_pending;
-
-static void usb_pending_overlay(struct led_pattern_state *state, uint8_t *brightness) {
-    k_mutex_lock(&usb_pending_mutex, K_FOREVER);
-    led_pattern_usb_pending_overlay(&usb_pending, state, brightness);
-    k_mutex_unlock(&usb_pending_mutex);
-}
 
 static bool read_int32(const struct zmk_custom_setting *setting, int32_t *out) {
     struct zmk_custom_setting_value value;
@@ -244,6 +242,13 @@ static bool read_bool(const struct zmk_custom_setting *setting, bool *out) {
     return true;
 }
 
+/* Registry writes dispatch after releasing their state lock. Serialize this
+ * complete read/apply operation so an older callback cannot finish after a
+ * newer callback and leave the immediate desired getters behind the registry.
+ * Static initialization also covers endpoint events before controller init;
+ * no registry or controller metadata lock is held while acquiring this mutex. */
+K_MUTEX_DEFINE(settings_apply_mutex);
+
 /*
  * Applied as a set, starting from what the LED is running now, so a value that
  * cannot be read leaves its field alone instead of resetting it.
@@ -271,12 +276,6 @@ static void led_pattern_apply_settings(void) {
     if (read_int32(live->brightness, &brightness)) {
         next_brightness = (uint8_t)CLAMP(brightness, 0, 100);
     }
-    if (live == &usb_transport) {
-        usb_pending_overlay(&state, &next_brightness);
-    }
-    if (next_brightness != led_pattern_get_brightness()) {
-        led_pattern_set_brightness(next_brightness);
-    }
     if (read_bool(&led_pattern_cs_adv_blink, &adv_blink)) {
         state.advertising_indicator = adv_blink;
     }
@@ -284,27 +283,35 @@ static void led_pattern_apply_settings(void) {
         state.idle_off = idle_off;
     }
 
-    LOG_INF("led: applying %s -> pattern %u speed %u indicator %d idle-off %d", live->name,
+    LOG_DBG("led: applying %s -> pattern %u speed %u indicator %d idle-off %d", live->name,
             state.pattern, state.speed, (int)state.advertising_indicator, (int)state.idle_off);
 
     struct led_pattern_state current;
     led_pattern_get_state(&current);
     if (state.pattern != current.pattern || state.speed != current.speed ||
         state.advertising_indicator != current.advertising_indicator ||
-        state.idle_off != current.idle_off) {
-        led_pattern_set_state(&state);
+        state.idle_off != current.idle_off ||
+        next_brightness != led_pattern_get_brightness()) {
+        led_pattern_set_presentation(&state, next_brightness);
     }
 }
 
 static int led_pattern_settings_event_cb(const zmk_event_t *eh) {
-    ARG_UNUSED(eh);
+    const struct zmk_custom_setting_changed *changed = as_zmk_custom_setting_changed(eh);
+
+    if (changed != NULL &&
+        strcmp(changed->setting->custom_subsystem_id, ZMK_LED_PATTERNS_SUBSYSTEM) != 0) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
 
     /*
-     * Every subscribed event means the same thing here -- what the LED should
-     * be showing may have moved -- and re-reading five scalars is cheaper
+     * Initialization, an endpoint change or a change to our own settings may
+     * alter what the LED should show. Re-reading five scalars is cheaper
      * than working out which one did.
      */
+    k_mutex_lock(&settings_apply_mutex, K_FOREVER);
     led_pattern_apply_settings();
+    k_mutex_unlock(&settings_apply_mutex);
 
     return ZMK_EV_EVENT_BUBBLE;
 }
@@ -353,17 +360,14 @@ static const struct transport_settings *const transports[] = {
  * Set on the thread the press arrives on, cleared on the low-priority queue. */
 static atomic_t unsaved[ARRAY_SIZE(transports)];
 
-/* A key press and the delayed saver can run on different threads. Keep the
- * memory write, dirty mark and later read/persist operation indivisible with
- * respect to each other, or the saver can write an older value back over a
- * newer press. Client writes use PERSIST themselves and do not enter this
- * path. */
+/* Serialize this module's key writes and dirty bookkeeping with its saver.
+ * Direct clients use the registry lock; save() atomically persists the latest
+ * registry value without writing an earlier read back over a newer edit. */
 K_MUTEX_DEFINE(persist_mutex);
 
-/* The custom-settings API raises its change event synchronously. Suppress
- * only this module's USB-key writes while Studio's CDC port has no client;
- * the stored value remains readable when Studio reconnects. Do not suppress
- * BLE writes or writes while the port is open. */
+/* USB key writes always defer their Studio notification; core observers still
+ * receive the change synchronously. Saves suppress Studio notifications only
+ * while its USB CDC port is closed. BLE events retain their ordinary path. */
 static bool usb_studio_port_closed(void) {
 #if IS_ENABLED(CONFIG_ZMK_STUDIO_TRANSPORT_UART) && IS_ENABLED(CONFIG_ZMK_USB)
     if (zmk_endpoint_get_selected().transport == ZMK_TRANSPORT_USB) {
@@ -378,18 +382,36 @@ static bool usb_studio_port_closed(void) {
     return false;
 }
 
+/* Quiet writes still dispatch core events immediately. Older supported DYA
+ * custom-settings revisions expose only the legacy suppression bracket; that
+ * compatibility path inherits its global-suppression concurrency limitation. */
 static int write_led_setting(const struct zmk_custom_setting *setting,
-                             const struct zmk_custom_setting_value *value,
-                             enum zmk_custom_setting_write_mode mode) {
-    const bool suppress = usb_studio_port_closed();
-    if (suppress) {
-        zmk_custom_settings_notify_suppress_begin();
+                             const struct zmk_custom_setting_value *value, bool quiet) {
+    if (!quiet) {
+        return zmk_custom_setting_write(setting, value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     }
-    int ret = zmk_custom_setting_write(setting, value, mode);
-    if (suppress) {
-        zmk_custom_settings_notify_suppress_end();
-    }
+#if defined(ZMK_CUSTOM_SETTINGS_HAS_QUIET_WRITES)
+    return zmk_custom_setting_write_quiet(setting, value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+#else
+    zmk_custom_settings_notify_suppress_begin();
+    int ret = zmk_custom_setting_write(setting, value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    zmk_custom_settings_notify_suppress_end();
     return ret;
+#endif
+}
+
+static int save_led_setting(const struct zmk_custom_setting *setting, bool quiet) {
+    if (!quiet) {
+        return zmk_custom_setting_save(setting);
+    }
+#if defined(ZMK_CUSTOM_SETTINGS_HAS_QUIET_WRITES)
+    return zmk_custom_setting_save_quiet(setting);
+#else
+    zmk_custom_settings_notify_suppress_begin();
+    int ret = zmk_custom_setting_save(setting);
+    zmk_custom_settings_notify_suppress_end();
+    return ret;
+#endif
 }
 
 static const struct zmk_custom_setting *field_setting(const struct transport_settings *transport,
@@ -418,32 +440,28 @@ static void usb_coalesce_work_handler(struct k_work *work) {
 
     for (int field = LED_PATTERN_FIELD_PATTERN; field <= LED_PATTERN_FIELD_SPEED; field++) {
         k_mutex_lock(&usb_pending_mutex, K_FOREVER);
-        int32_t value = 0;
         uint32_t version = 0;
-        const bool pending = led_pattern_usb_pending_peek(&usb_pending, field, &value, &version);
+        const bool pending = led_pattern_usb_pending_peek(&usb_pending, field, &version);
         k_mutex_unlock(&usb_pending_mutex);
         if (!pending) {
             continue;
         }
 
-        const struct zmk_custom_setting *setting = field_setting(&usb_transport, field);
-        const struct zmk_custom_setting_value new_value = ZMK_CUSTOM_SETTING_VALUE_INT32(value);
-        k_mutex_lock(&persist_mutex, K_FOREVER);
-        int ret = write_led_setting(setting, &new_value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
-        if (ret == 0) {
-            atomic_set_bit(&unsaved[TRANSPORT_USB], field);
-            k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &persist_work,
-                                        K_MSEC(LED_PATTERN_PERSIST_DELAY_MS));
+        int ret = 0;
+        if (!usb_studio_port_closed()) {
+            ret = raise_zmk_custom_setting_changed((struct zmk_custom_setting_changed){
+                .setting = field_setting(&usb_transport, field),
+                .kind = ZMK_CUSTOM_SETTING_CHANGED_VALUE_UPDATED,
+                .source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL,
+            });
         }
-        k_mutex_unlock(&persist_mutex);
-
         k_mutex_lock(&usb_pending_mutex, K_FOREVER);
-        if (led_pattern_usb_pending_finish(&usb_pending, field, version, ret == 0)) {
+        if (led_pattern_usb_pending_finish(&usb_pending, field, version, ret >= 0)) {
             retry = true;
         }
         k_mutex_unlock(&usb_pending_mutex);
         if (ret < 0) {
-            LOG_WRN("led: writing %d to \"%s\" failed (%d)", value, setting->key, ret);
+            LOG_WRN("led: notifying USB field %d failed (%d)", field, ret);
         }
     }
     if (retry) {
@@ -464,17 +482,12 @@ static void persist_work_handler(struct k_work *work) {
             }
 
             const struct zmk_custom_setting *setting = field_setting(transports[t], field);
-            struct zmk_custom_setting_value value;
 
             /* Serialize with the memory write and clear the dirty bit only
              * after flash accepted the value. A transient storage failure must
              * not silently turn a live setting into a value lost at reboot. */
             k_mutex_lock(&persist_mutex, K_FOREVER);
-            int ret = zmk_custom_setting_read(setting, &value);
-            if (ret == 0) {
-                ret = write_led_setting(setting, &value,
-                                        ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
-            }
+            int ret = save_led_setting(setting, t == TRANSPORT_USB && usb_studio_port_closed());
             if (ret == 0) {
                 atomic_clear_bit(&unsaved[t], field);
             } else {
@@ -491,43 +504,34 @@ static void persist_work_handler(struct k_work *work) {
     }
 }
 
-/*
- * BLE writes in memory synchronously. USB applies the LED directly and
- * coalesces the memory writes above, so a stream of key repeats does not
- * become a stream of USB Studio notifications. Both paths persist to flash
- * three seconds after the final memory write.
- */
+/* Both transports commit their registry value immediately. Only USB Studio
+ * notifications wait for a quiet interval; flash follows the final key write. */
 int led_pattern_settings_store(enum led_pattern_field field, int32_t value) {
     const struct transport_settings *live = active_transport();
     const struct zmk_custom_setting *setting = field_setting(live, field);
-
     if (setting == NULL) {
         return -EINVAL;
     }
 
-    if (live == &usb_transport) {
-        k_mutex_lock(&usb_pending_mutex, K_FOREVER);
-        led_pattern_usb_pending_put(&usb_pending, field, value);
-        k_mutex_unlock(&usb_pending_mutex);
-        k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &usb_coalesce_work,
-                                    K_MSEC(LED_PATTERN_USB_COALESCE_MS));
-        /* The caller applies the hardware value now; Studio gets the final
-         * value from the coalesced memory write above. */
-        return 1;
-    }
-
+    const bool usb = live == &usb_transport;
     const struct zmk_custom_setting_value new_value = ZMK_CUSTOM_SETTING_VALUE_INT32(value);
     k_mutex_lock(&persist_mutex, K_FOREVER);
-    int ret = write_led_setting(setting, &new_value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
-    if (ret != 0) {
-        k_mutex_unlock(&persist_mutex);
+    int ret = write_led_setting(setting, &new_value, usb);
+    if (ret == 0) {
+        atomic_set_bit(&unsaved[usb ? TRANSPORT_USB : TRANSPORT_BLE], field);
+        if (usb) {
+            k_mutex_lock(&usb_pending_mutex, K_FOREVER);
+            led_pattern_usb_pending_mark(&usb_pending, field);
+            k_mutex_unlock(&usb_pending_mutex);
+            k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &usb_coalesce_work,
+                                        K_MSEC(LED_PATTERN_USB_COALESCE_MS));
+        }
+    }
+    k_mutex_unlock(&persist_mutex);
+    if (ret < 0) {
         LOG_WRN("led: writing %d to \"%s\" failed (%d)", value, setting->key, ret);
         return ret;
     }
-
-    /* USB returned above, so this is the BLE set. */
-    atomic_set_bit(&unsaved[TRANSPORT_BLE], field);
-    k_mutex_unlock(&persist_mutex);
     k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &persist_work,
                                 K_MSEC(LED_PATTERN_PERSIST_DELAY_MS));
     return 0;

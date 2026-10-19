@@ -13,11 +13,11 @@ halves have found each other before it says anything else.
   bind it;
 - optionally publishes the whole LED state through
   `zmk-feature-custom-settings`, so a client can edit it with no page of its
-  own. BLE key presses update the setting immediately; USB key presses update
-  the LED immediately and coalesce rapid setting writes for Studio;
-- no animation timer. Each pattern reports when it next changes and the redraw
-  is scheduled for that moment, and nothing is scheduled at all while the
-  keyboard is idle.
+  own. BLE and USB key presses update the setting immediately; USB coalesces
+  Studio notification dispatch for rapid key changes;
+- no fixed animation tick. Each pattern reports its next change. With idle-off
+  enabled, normal animation redraw stops while idle; foreground settings,
+  connection and power transitions retain their own bounded work.
 
 ## Install
 
@@ -132,10 +132,12 @@ A step lands on a multiple of ten, so a brightness of 95 set from a client steps
 to 100 or 90 rather than carrying the 5 along, and a speed step does the same
 between its bounds.
 
-Brightness 0 is the LED's low-power state rather than a dim one, and a step down
-reaches it. The LED is written to zero once, which lets the PWM peripheral stop,
-and no redraw is scheduled at all until the brightness rises again; the pattern
-then picks up at the point its clock has reached. The split connection indicator
+Brightness 0 requests zero from the LED driver and stops normal animation
+redraw until brightness rises again. The driver/PWM hardware determines the
+actual electrical and current response. Split quality expiry is consumed once;
+it does not start background LED synchronization. When brightness rises, a
+reusable fresh clock can preserve phase; a stale clock or refit deliberately
+starts a new phase at a validated future common edge. The split connection indicator
 is the one thing that still lights at zero, because it is a diagnostic and has to
 look the same whatever the LED is set to. The advertising indicator is scaled by
 the brightness like the patterns, so it goes dark too.
@@ -147,9 +149,9 @@ gate left charged by a released pin does the same. With `CONFIG_PM_DEVICE` (soft
 off selects it) the module registers two small power-management devices, one
 before the PWM driver and one after the LED device in init order, because the
 two power-off paths suspend in opposite orders. Whichever runs first stops the
-animation and the split mirror and writes zero while the LED drivers still
-work; the other finds that done. A resume, if the power-off is abandoned,
-redraws where the pattern had got to. Their priorities are
+animation and fences split work, then writes zero before waiting for transport
+work to drain. The other finds that done. An abandoned split suspend starts a
+new clock handshake and future reservation; standalone redraws its local curve. Their priorities are
 `CONFIG_ZMK_LED_PATTERNS_PM_INIT_PRIORITY` (45) and
 `CONFIG_ZMK_LED_PATTERNS_PM_LATE_INIT_PRIORITY` (95).
 
@@ -160,8 +162,9 @@ up by the same factor and cannot get a single one of them wrong.
 With `CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS=y` a binding does not touch the
 LED directly: it writes the setting its behavior is named after, for the
 transport the keyboard is on now, and the LED follows that setting - see
-[Studio settings](#studio-settings). Without the option, a binding applies its
-value to the LED directly.
+[Studio settings](#studio-settings). Without the option, a binding requests the
+controller directly. Standalone output follows immediately; split output uses
+the shared future reservation in either path.
 
 Each behavior publishes ZMK parameter metadata, which is what makes it
 selectable in a Studio keymap editor. A behavior that publishes none is treated
@@ -182,8 +185,12 @@ non-zero is rejected as invalid.
 | 7 | `LED_PATTERN_CANDLE` | 16 | `LED_PATTERN_RIPPLE` |
 | 8 | `LED_PATTERN_SAWTOOTH` | 17 | `LED_PATTERN_FADE_BLINK` |
 
-`LED_PATTERN_COUNT` is one past the last. Adding a pattern means raising it and
-adding the curve; the cycling commands and the settings range both follow.
+`LED_PATTERN_COUNT` is one past the last. Raising it updates the cycling commands
+and settings range. Adding a pattern also requires its curve and an updated split
+protocol range, plus a paired wire schema/version update when needed. Recalculate
+the period LCM used for overflow-safe phase scaling, update the curve/runtime,
+codec and 64-bit phase tests, and run the kernel checks if scheduling or the wire
+contract changes.
 
 ## Studio settings
 
@@ -215,10 +222,10 @@ as "on" is a different one. The advertising indicator is the one value that is
 not split, because it is about having no connection at all rather than about
 which one.
 
-`idle_off` is per transport for the sharpest version of that argument: USB
-means a cable, where keeping the LED lit through idle costs nothing that
-matters, and BLE means a battery, where it is the only setting in this module
-that really shortens the day.
+`idle_off` is per transport so a cable-powered USB session can keep animating
+while a BLE session can stop normal animation when idle. Brightness, pattern,
+LED hardware and radio activity also affect power. This module has no measured
+battery-life or current-consumption guarantee.
 
 A pattern is a plain 0 - 17 number rather than a named dropdown because the
 Studio RPC schema caps an options constraint at eight values and the handler
@@ -227,19 +234,29 @@ the first eight and losing the other ten. The complete names live where they
 fit - in the parameter metadata a keymap editor draws, and in the public
 header.
 
-**Key presses update the LED immediately.** BLE also updates the live
-transport's setting immediately. USB combines rapid presses into one setting
-write after 300 ms of quiet, so a burst cannot overwhelm Studio's USB
-notification transport; a client shows the final value after that short
-delay. Settings are saved to flash three seconds after the last memory write,
-not once per press. When the USB Studio CDC port is closed, LED-originated
-setting writes suppress only their Studio notifications through the existing
-custom-settings API; the values still update and persist, and a reconnecting
-client can read them. A client edit still applies immediately.
+**Key presses update the live registry and desired getters immediately on both
+transports.** Standalone output follows the controller immediately. Split output
+changes at a shared future reservation; repeated key steps use the latest desired
+value while that reservation is pending. USB combines notification attempts after 300 ms of quiet. Each
+attempt reads the current registry value; it never replays an older pending
+key value over a later client edit. Settings are saved to flash three seconds
+after the last memory write, using the registry's atomic save of its current
+value. A client edit updates desired state immediately. A failed memory write is
+reported and the behavior falls back to the controller request, with the same
+standalone or split presentation policy; it creates no pending registry value
+or dirty save for that failed write.
+
+USB-key writes defer only their Studio notifications while core observers see
+the change immediately. Saves suppress Studio notifications while the USB
+Studio CDC port is closed. Current custom-settings supports call-scoped quiet
+events, so an unrelated concurrent write retains its notification. The original
+supported c6a7 dependency uses its existing global suppression bracket and
+retains that dependency's concurrent-suppression limitation. Reconnecting
+clients can read the registry. Event dispatch success does not acknowledge the
+Studio queue, BLE/USB delivery or congestion recovery.
 
 Only the central registers these. A peripheral needs none of its own: whatever
-reaches the central, a key press or an edit made in a client, is mirrored to it
-as final state.
+reaches the central, a key press or an edit made in a client, is scheduled on both halves as final state.
 
 With the option off - the default, and what an upstream ZMK build gets - none
 of this is compiled and the keymap bindings are the whole interface.
@@ -251,39 +268,48 @@ decoration. The split indicator wins over the advertising one.
 
 ### The split link
 
-On a split the LED is a status display before it is anything else. Both halves
-show the same three stages, and neither leaves the indicator until the pair has
-actually agreed:
+The central synchronizes an LED-only logical clock with its one peripheral,
+then both halves reserve the same future central timestamp. Receiving a state
+packet does not apply it immediately. The visible phase comes from a shared
+64-bit epoch. Settings and desired getters still update immediately, so a held
+step uses the latest requested value. One immutable reservation and one latest
+desired snapshot keep continuous edits bounded.
 
 | stage | LED | meaning |
 | --- | --- | --- |
-| waiting | blink, the shape of pattern 3 | the other half is not there |
-| linked | steady, the shape of pattern 0 | the link is up, state not yet agreed |
-| synced | the normal pattern, default breathe (1) | the peripheral has confirmed what it is showing |
+| WAITING | fixed waiting blink | no peer link |
+| LINKED | steady diagnostic | no usable completed reservation |
+| RUNNING_UNCONFIRMED | normal reserved pattern | output confirmation is pending |
+| SYNCED | normal reserved pattern | required completion confirmed, current clock quality bounded |
+| COASTING | last successful pattern, free-running | confirmed output with expired/unbounded phase accuracy |
+| COASTING_UNCONFIRMED | last successful pattern, free-running | phase accuracy and complete output confirmation are absent |
 
-Five seconds after the link comes up - long enough for the central to have
-discovered the peripheral's relay characteristic, because a write before that
-is dropped by the transport with nothing but a log line - the central sends a
-`led` packet carrying the whole state: pattern, brightness, speed, the
-advertising flag, and how far into the current curve it is, so the peripheral
-picks the animation up in phase instead of restarting it.
+Clock exchange starts five seconds after link-up. Version4 `ls4` messages carry
+both boot/link identities and sequence numbers; exact complete-state ACKs cannot
+confirm another reservation. The four-message clock exchange accounts for queue
+delay and path asymmetry, rejects network RTT above80ms, and uses an explicit
+50ms modeled uncertainty limit and8s expiry. Future apply is1000+2RTTms ahead;
+quality is checked at that future time and actual completion. These are software
+admission/recovery bounds, not measured physical phase accuracy.
 
-The peripheral answers with a `lea` packet naming the pattern it is now
-showing. That acknowledgement is what makes "synced" an observed fact rather
-than an assumption, and it is what releases the indicator on both halves. The
-connect-time send is made at most five times, half a second apart, waiting for
-it and then gives up, leaving the LED on steady - which is the readable
-difference between a pair that never linked and a pair that linked but never
-agreed. Relay event names are capped at four bytes including the NUL, which is
-why both are three characters.
+Clock exchange runs on demand at startup, reconnect, resume and effective visual
+changes. Settings can reuse an acknowledged fit only while the future reservation
+still passes the same bounds. There is no periodic clock/STATE traffic or endless
+recovery loop. One transaction permits five clock probes and three future plans,
+each with at most three admission copies; coalesced edits do not refill it. A new
+latest intent can receive its own finite budget when the old transaction ends.
+An exact ACCEPTED stops redundant copies without confirming output.
 
-State changes after that send one packet each, coalesced over 20 ms so a
-settings apply or a dragged slider is one radio event rather than a stream.
+After accuracy expires, the last successful pattern keeps free-running as
+COASTING or COASTING_UNCONFIRMED. A later stale-to-fresh update deliberately
+restarts a common phase at the future edge. Failed new output restores and
+replays the prior successful view. ACK loss is not atomic delivery. Both halves
+require matching version4; periodic version3/ls3 and earlier protocols are incompatible.
 
-The behaviors are `BEHAVIOR_LOCALITY_CENTRAL`: the central owns the state and
-mirrors the result, rather than the peripheral invoking a behavior a second
-time of its own. Include the module and the same behavior nodes in both
-firmware images.
+The behaviors remain `BEHAVIOR_LOCALITY_CENTRAL`. Include the module and the same
+behavior nodes in both images. See [the complete timing and wire contract](SCHEDULED_SYNC.md)
+for quality math, session fencing, PM recovery, packet/stack cost and evidence
+limits. Physical BLE/LED acceptance remains a separate check.
 
 ### The host link
 
@@ -292,7 +318,8 @@ followed by 1.2 seconds fully off, at a fixed rate that does not follow the
 speed setting: it says something about the connection, so it has to stay
 recognisable whatever the patterns are set to. Selecting a pattern clears it
 until the connection state next changes; turning `led.adv_blink` off makes that
-permanent. A peripheral has no endpoint of its own and never shows it.
+permanent. A peripheral has no endpoint of its own; it displays the central's
+reserved advertising flag together with the other shared presentation fields.
 
 ## Scheduling and power
 
@@ -304,42 +331,37 @@ are the only shape without edges of their own, and the only thing still sampled
 on a clock - at 40 ms, while one is actually being drawn.
 
 The animation also follows `zmk_activity_state_changed`: once ZMK reports the
-keyboard idle the LED goes dark and nothing is scheduled until the next press.
+keyboard idle the LED goes dark and animation redraw stops until the next press.
+The next effective split activity change is reserved; expiry alone does not send
+LED traffic. With idle-off disabled, activity changes do not start LED transactions.
 Clearing the live `idle_off` buys the other policy - the animation keeps
-running for as long as the keyboard is powered - and it is the one setting here
-that really does cost battery rather than merely looking as though it might.
+running for as long as the keyboard is powered - and it keeps animation work active. Event-driven split transactions have their
+own bounded cost.
 Both inputs to that decision are re-read rather than latched, so clearing it
-while the keyboard is *already* idle lights the LED straight away instead of
-waiting for a key.
+while the keyboard is *already* idle requests light without waiting for a key;
+a split uses its next future reservation.
 
-**On a split, activity is the central's to decide.** The two halves do not see
-the same key presses: ZMK resets activity from `zmk_position_state_changed`,
-and a peripheral's presses reach both halves - its own locally, the central's
-copy over the split - while a central's reach only the central. A peripheral
-left to its own activity therefore goes dark after the idle timeout of someone
-typing on the other half, and stays dark. So the mirror carries the central's
-activity along with the flag, and a peripheral treats either half's word as
-enough: the central's covers typing that never reaches it, its own covers its
-keys without waiting for a relay and covers having no central to ask at all.
-
-That costs two extra messages per idle cycle, and each of them carries the
-pattern's phase, so waking re-agrees the curve as well as the fact of being
-awake.
+**On a split, normal activity is central-authoritative.** The central sees
+positions from both halves and reserves activity/idle policy changes together
+with the presentation state. A wake resets the shared phase at a future edge.
+Local activity controls the diagnostic indicator when no usable reservation is
+running. PM still darkens the local LED immediately through its separate fence
+and drain sequence.
 
 Both indicators use a true-zero dark phase rather than the 3-5% floor the
 blink-family patterns are drawn with. On nRF, Zephyr's PWM driver stops the PWM
 peripheral - and lets go of the high-frequency clock it needs - only when every
 channel sits at exactly 0% or 100% duty, so a dim floor would keep that clock
 running through states that exist because something is wrong and may last a
-long time. The advertising indicator's *lit* phase stays at 70%, where the
-LED's own current dominates and dimming is the cheaper option.
+long time. The advertising indicator's *lit* phase stays at 70% duty. Its
+total current, including PWM and clock overhead, requires measurement on the
+target board.
 
-Every redraw and every mirror runs on `zmk_workqueue_lowprio_work_q()`, never
-the system work queue. ZMK posts its advertising-restart work there, and an
-animation has no business queuing in front of the item that makes a keyboard
-findable again after a host disconnect; separately, Zephyr refuses to block for
-an ATT TX buffer when the caller is that queue, so a split write posted from it
-fails whenever the buffer pool is momentarily empty.
+Standalone redraw and split TX use ZMK's low-priority queue. Split redraw and
+reserved apply share a separate1536-byte queue at the same priority, so a core
+relay enqueue that blocks cannot occupy the render queue. Neither uses the
+system queue that restarts host advertising. Runtime stack high-water, physical
+scheduling accuracy and power have not been inferred from compilation.
 
 ## Optional battery ADC load correction
 
@@ -359,10 +381,13 @@ measured 50 mV drop at 100% LED duty, add this node and select it as
 };
 ```
 
-On every sample the wrapper reads the divider's voltage, takes the *locally
-applied* LED duty the ADC has just seen, and adds `round(50 mV * duty / 100)`.
-Pattern-off, brightness zero, idle-off, and power-off add zero. Temporary
-connection indicators use their actual duty. ZMK reports the state of charge,
+After the divider fetch, the wrapper reads the duty recorded by the latest
+successful local LED write and adds `round(50 mV * duty / 100)`. PWM changes
+are not latched to ADC acquisition, so this is a load-correction estimate.
+A transition during acquisition can make the recorded duty differ from the
+sampled load; electrical accuracy requires board measurements. A recorded
+zero duty adds zero. Temporary connection indicators use their recorded duty.
+ZMK reports the state of charge,
 which the divider computes from its own, uncorrected voltage, so the wrapper
 maps the corrected voltage to a percentage again exactly as the divider does:
 over the divider's `mv-to-pct-thresholds` on the DYA fork, read from the same
@@ -378,69 +403,77 @@ verify the sign and intermediate duties on the actual hardware before flashing.
 
 ## Compatibility and tests
 
-The base behaviors build against upstream ZMK `main` on a non-split keyboard.
-Split synchronization uses DYA's relay-event API and therefore requires the
-DYA ZMK fork; an upstream split build does not provide that API. The optional Studio
-settings integration additionally needs `cormoran/zmk` `main+dya` and
-`zmk-feature-custom-settings`; leaving the option off removes that dependency.
+| Core and role | Supported path |
+| --- | --- |
+| Stock ZMK, standalone | Base behaviors and optional battery correction |
+| DYA, standalone | Base behaviors; optional custom-settings/Studio integration |
+| DYA, split central and one peripheral | Scheduled synchronization through the DYA relay API; optional settings on central |
+| Stock ZMK, split | Not applicable: the required DYA relay API is absent |
 
-CI builds a real nRF52840 ZMK firmware fixture in both configurations. It checks
-that all three behaviors are linked, that the DYA setting namespace and all nine keys
-are present only in the DYA build, that `CONFIG_ZMK_BACKLIGHT` stays off so
+The integration manifests track upstream `main` and `cormoran/zmk` `main+dya`
+for compatibility checks. The default DYA fixture pins its legacy registry; an
+explicit current-registry override is an additional interface check. See the
+[owner test guide](tests/README.md) for exact offline pins and commands.
+
+CI builds four nRF52840 fixtures: stock standalone, DYA standalone, DYA central
+and DYA peripheral. It also runs both roles against the pinned Zephyr native
+kernel with controlled relay/PWM APIs. Firmware validation checks all three
+behaviors and the DYA setting namespace and nine keys where settings are enabled, that `CONFIG_ZMK_BACKLIGHT` stays off so
 there is only one owner of the PWM LED, and that ZMK's battery reporting, in its
 state-of-charge fetch mode, reads the linked battery wrapper as its chosen
 `zmk,battery`.
 
-The host regression suite runs with optimized compilation and ASan/UBSan via
-`bash ./tests/run-host-docker.sh`. It covers burst coalescing (latest value per
-setting), independent fields, updates during a write, retry after a failed
-write, value overlay, and USB port-open decisions. A deterministic 100,000-step
-interleaving simulation also exercises rapid edits and failed writes; CI requires
+The host regression suite runs with ASan/UBSan via
+`bash ./tests/run-host-docker.sh`; full mode also retains optimized and coverage
+variants. It covers immediate registry values, independent fields, later client
+edits, updates during notification dispatch, controlled dispatch failure/retry,
+atomic delayed saves, synchronous memory failure/recovery, and USB port-open
+decisions through both current and original registry APIs. A deterministic
+100,000-step interleaving test retains the original generation/dispatch input
+schedule; CI requires
 100% line and branch coverage of the small `usb_pending.h` helper. The host
 suite also checks the ADC offset arithmetic, compares both percentage mappings
 with ZMK's own code (the float interpolation and the lithium-ion line) at every
 millivolt from 0 to 5 V, and fault-injects the actual battery sensor callbacks
 against a stand-in that, like the real divider, refuses anything but the gauge
-channels. It then lifts every function of the module's C
-sources into the stubbed harnesses in `tests/runtime/`: the eighteen curves
-and their clock, drawing, idle and power-off handling, the state API and all
-three behaviors, built as a standalone keyboard with and without BLE, as a
-split central (indicator, connect-time exchange, mirror) and as a split
-peripheral (mirror, acknowledgement, the central's word on activity); and the
-settings bridge with and without USB (per-transport sets, USB coalescing,
-deferred flash saves with retry, notification suppression while Studio's port
-is closed). CI requires 100% line and branch coverage of every lifted function.
-Devicetree instantiation, relay registration and the settings declarations are
-left to the firmware fixtures above.
+channels. The host harnesses exercise selected controller, settings bridge,
+battery and behavior functions, including the eighteen curves, standalone BLE
+and non-BLE roles, and the split controller API. Full mode enforces the documented
+line and branch coverage gates for small helpers and selected runtime functions.
+Native tests separately exercise the actual scheduled adapter and kernel
+interleavings. Firmware fixtures cover devicetree instantiation, relay
+registration and settings declarations.
 
-The split mirror itself is tested end to end over BabbleSim, Zephyr's
-simulated radio, with `bash ./tests/bsim/run-docker.sh`: a real split central
-and peripheral built for `nrf52_bsim` link over BLE, sync, and follow a
-pattern change made by a key on either half - each change mirrored to the
-peripheral and acknowledged back - and the log of both halves must match
-`tests/bsim/split-mirror/snapshot.log`. The first run builds a DYA-fork
-workspace with BabbleSim into the Docker volume `zmk-bsim-ws`. A reset is not
-covered: a simulated device that reboots exits, ending the simulation.
-
-The battery correction runs end to end the same way, in
-`tests/bsim/battery-sag`. The simulator has no SAADC, so a test-only module
-stands in for the divider and models what is in front of it: a 3825 mV battery
-that sags 50 mV at full LED duty, a physical 1 M / 510 k divider read through
-a 12-bit SAADC at gain 1/6, and from the pin voltage on the divider driver's own
-arithmetic with 507 k devicetree values. Both halves sample every second
-through the real wrapper and ZMK's real battery reporting, while the central
-steps the LED from its startup animation through 0, 50 and 100 percent and the
-peripheral follows by mirror. The snapshot holds the stand-in's uncorrected
-readings, which move with the LED, and the levels ZMK reports, which must not:
-each half's own, and the peripheral's as the central reads it from the
-peripheral's BAS over the simulated link. The central's divider has no
-thresholds and the peripheral's has, so one run covers both mappings. With
-the offset set to zero, the reported levels follow the LED and the test fails.
+See [the module-owned test guide](tests/README.md) for current commands,
+assertion replacement maps and physical acceptance requirements.
 
 The USB mitigation applies
 to this module's LED-originated setting notifications. It does not change the
 shared DYA RPC transmitter or guarantee that unrelated Studio producers cannot
-block if its transmit buffer fills.
+block if its transmit buffer fills. A successful local event dispatch is not
+feedback from the Studio queue or the physical transport.
+
+## Upgrading a split from ls3 to ls4
+
+1. Select the same module revision for both halves and build both firmware images
+   against a supported DYA core. Keep that revision in the consuming manifest for
+   a reproducible deployment.
+2. Update both halves as a pair. Version4/`ls4` deliberately rejects version3/`ls3`
+   and older peers; a temporary mixed pair cannot synchronize its normal display.
+   There is no automatic wire fallback.
+3. Reconnect and check startup, repeated settings, idle/wake and independent
+   suspend/resume on both halves. Existing LED keys/settings require no migration
+   or settings/bond reset for this wire change.
+
+Desired settings remain immediate, while visible split changes use a future
+common edge. Between meaningful events the display free-runs in COASTING after
+clock expiry; long-term physical phase alignment is not guaranteed. See
+[SCHEDULED_SYNC.md](SCHEDULED_SYNC.md) for finite recovery and freshness rules.
+
+Before a release, test matching production boards for actual split/BLE delivery,
+congestion/reconnect, PWM timing, power, USB/Studio coexistence and reset/PM
+retention. Host/native tests and firmware builds do not satisfy those physical
+acceptance gates.
 
 ## License
 

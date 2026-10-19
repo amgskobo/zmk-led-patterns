@@ -1,7 +1,10 @@
 # Copyright (c) 2026 amgskobo
 # SPDX-License-Identifier: MIT
 
-"""Exercise production driver code with host stubs and require full coverage of it.
+"""Exercise all production-driver scenarios in quick or full host mode.
+
+Quick runs every fixture under ASan/UBSan. Full additionally executes the
+optimized and measured coverage variants and retains the coverage gate below.
 
 Each fixture names a source file, the functions whose lines and branches it
 gates, and any further functions it only needs in order to compile. They are
@@ -20,13 +23,23 @@ import pathlib
 import re
 import subprocess
 import tempfile
+import sys
+
+import os
+
+mode = os.environ.get("ZMK_TEST_MODE", "quick")
+if mode not in ("quick", "full"):
+    raise SystemExit("ZMK_TEST_MODE must be quick or full")
+variants = (('optimized', ['-O2']), ('sanitized', ['-O1', '-g', '-fno-omit-frame-pointer', '-fsanitize=address,undefined', '-fno-sanitize-recover=all']), ('coverage', ['-O0', '--coverage']))
+if mode == "quick":
+    variants = tuple(v for v in variants if v[0] == "sanitized")
 
 root = pathlib.Path(__file__).resolve().parents[2]
 source_dir = root / "src"
 links = ()
 # Sources with a coverage gate of their own.
-elsewhere = ()
-# Built into every behavior_led_pattern.c role: the curves and their clock.
+elsewhere = ("led_scheduled_sync.c",)  # Actual adapter functions: native/run_scheduled.sh.
+# Curves are shared; the standalone-only clock helpers are excluded below.
 curves = (
     "segment_sample",
     "table_sample",
@@ -63,14 +76,15 @@ shared = (
     "refresh_pattern_output",
     "apply_activity",
     "led_pattern_activity_listener",
-    "schedule_mirror",
     "masking_indicator",
     "led_pattern_get_state",
     "led_pattern_get_brightness",
     "led_pattern_applied_brightness",
     "notify_state_changed",
     "led_pattern_set_brightness",
+    "set_presentation",
     "led_pattern_set_state",
+    "led_pattern_set_presentation",
     "led_pattern_ready",
     "led_pattern_field_value",
     "apply_request",
@@ -87,9 +101,11 @@ host = (
     "ble_profile_changed_listener",
     "led_pattern_endpoint_listener",
 )
-split = ("split_status_showing", "set_split_stage", "split_status_sample")
+split = ("split_status_sample",)
 # Shared functions with role-specific code, gated again in the split roles.
-role_specific = ("pattern_work_handler", "schedule_mirror", "masking_indicator",
+role_specific = ("schedule_pattern_work", "pattern_work_handler", "masking_indicator",
+                 "apply_activity", "led_pattern_get_state", "led_pattern_get_brightness",
+                 "led_pattern_set_brightness", "set_presentation", "led_pattern_set_state", "apply_request",
                  "behavior_led_pattern_init", "led_pattern_pm_action")
 
 
@@ -103,19 +119,12 @@ fixtures = (
     # No split and no BLE: there is no advertising to show.
     ("usb_only", "behavior_led_pattern.c", ("should_show_advertising_blink",),
      without(curves + shared + host, "should_show_advertising_blink")),
-    ("central", "behavior_led_pattern.c", split + role_specific + (
-        "is_peripheral_conn",
-        "split_conn_connected",
-        "split_conn_disconnected",
-        "mirror_work_handler",
-        "led_pattern_ack_listener",
-    ), without(curves + shared + host, *role_specific)),
-    ("peripheral", "behavior_led_pattern.c", split + role_specific + (
-        "apply_activity",
-        "ack_work_handler",
-        "led_pattern_mirror_listener",
-        "led_pattern_peripheral_status_listener",
-    ), without(curves + shared, *role_specific, "apply_activity")),
+    ("central", "behavior_led_pattern.c", split + role_specific + ("refresh_connection_state",),
+     without(curves + shared + host, *role_specific, "refresh_connection_state",
+             "pattern_clock", "hold_to_wall_ms", "set_led_brightness")),
+    ("peripheral", "behavior_led_pattern.c", split + role_specific,
+     without(curves + shared, *role_specific,
+             "pattern_clock", "hold_to_wall_ms", "set_led_brightness")),
     ("brightness_behavior", "behavior_led_brightness.c", (
         "step_brightness",
         "on_brightness_pressed",
@@ -129,13 +138,13 @@ fixtures = (
     ("settings", "behavior_led_pattern_custom_settings.c", (
         "led_patterns_namespace_handler",
         "active_transport",
-        "usb_pending_overlay",
         "read_int32",
         "read_bool",
         "led_pattern_apply_settings",
         "led_pattern_settings_event_cb",
         "usb_studio_port_closed",
         "write_led_setting",
+        "save_led_setting",
         "field_setting",
         "usb_coalesce_work_handler",
         "persist_work_handler",
@@ -145,6 +154,14 @@ fixtures = (
         "active_transport",
         "usb_studio_port_closed",
     ), ()),
+    ("settings_interleaving", "behavior_led_pattern_custom_settings.c", (), (
+        "active_transport", "read_int32", "read_bool", "led_pattern_apply_settings",
+        "led_pattern_settings_event_cb",
+    )),
+    ("settings_presentation", "behavior_led_pattern_custom_settings.c", (), (
+        "active_transport", "read_int32", "read_bool", "led_pattern_apply_settings",
+        "led_pattern_settings_event_cb",
+    )),
     ("battery", "battery_adc_offset.c", (
         "led_battery_channel_supported",
         "led_battery_sample_fetch",
@@ -152,6 +169,10 @@ fixtures = (
         "led_battery_init",
     ), ()),
 )
+
+# Exercise the same assertions through the original pinned registry API too.
+settings_fixture = next(row for row in fixtures if row[0] == "settings")
+fixtures += (("settings_legacy", *settings_fixture[1:]),)
 
 
 def definition(source, name):
@@ -164,7 +185,15 @@ def definition(source, name):
     name, _, nth = name.partition(":")
     skip = int(nth or 1) - 1
     for match in re.finditer(r"\b" + name + r"\s*\(", source):
-        closing = source.find(")", match.end())
+        closing = match.end()
+        depth = 1
+        while depth:
+            if source[closing] == "(":
+                depth += 1
+            elif source[closing] == ")":
+                depth -= 1
+            closing += 1
+        closing -= 1
         if not source[closing + 1:].lstrip().startswith("{"):
             continue  # a call or a prototype
         start = source.rfind("\n", 0, match.start()) + 1
@@ -262,11 +291,8 @@ def ungated_functions():
     return missing
 
 
-missing_functions = ungated_functions()
-if missing_functions:
-    raise RuntimeError("functions no fixture gates:\n  " + "\n  ".join(missing_functions))
-
-for fixture, file_name, gated, support in fixtures:
+def render_fixture(file_name, gated, support, harness_path, marker="/* DRIVER_FUNCTIONS */"):
+    """Use the same unmodified production definitions for host and kernel fixtures."""
     source_path = source_dir / file_name
     source = source_path.read_text(encoding="utf-8")
     functions = []
@@ -280,28 +306,99 @@ for fixture, file_name, gated, support in fixtures:
             text = "__attribute__((unused)) " + text
         functions.append(f'#line {first} "{source_path}"\n{text}')
 
-    harness_path = root / "tests/runtime" / f"{fixture}_harness.c"
     harness = harness_path.read_text(encoding="utf-8")
-    marker = "/* DRIVER_FUNCTIONS */"
     resume = harness.count("\n", 0, harness.index(marker)) + 2
+    return harness.replace(marker, "\n".join(functions) +
+                           f'\n#line {resume} "{harness_path}"'), ranges
+
+
+
+def presentation_adapter(unit, harness_path):
+    """Actual adapter metadata admission; kernel calls remain fixture boundaries."""
+    marker = "/* DRIVER_ADAPTER_FUNCTIONS */"
+    source_path = source_dir / "led_scheduled_sync.c"
+    source = source_path.read_text(encoding="utf-8")
+    names = ("led_scheduled_get_desired", "effective_desired", "publish_locked",
+             "led_scheduled_set_brightness", "set_state_locked", "led_scheduled_set_state",
+             "led_scheduled_set_presentation", "led_scheduled_request")
+    definitions = []
+    for name in names:
+        first, _last, text = definition(source, name)
+        definitions.append(f'#line {first} "{source_path}"\n{text}')
+    harness = harness_path.read_text(encoding="utf-8")
+    resume = harness.count("\n", 0, harness.index(marker)) + 2
+    return unit.replace(marker, "\n".join(definitions) + f'\n#line {resume} "{harness_path}"')
+
+if sys.argv[1:]:
+    if len(sys.argv) != 3 or sys.argv[1] not in ("--settings-interleaving", "--native-scheduled", "--settings-presentation"):
+        raise SystemExit("usage: run.py [--native-scheduled|--settings-interleaving|--settings-presentation NEW_SOURCE_OUTPUT]")
+    output = pathlib.Path(sys.argv[2])
+    if output.exists() or output.is_symlink():
+        raise SystemExit(f"source output already exists: {output}")
+    if sys.argv[1] == "--native-scheduled":
+        adapter_functions = (
+            "schedule_locked", "report_stage_locked", "tx_handler", "apply_handler",
+            "receive_listener", "link_changed", "peer_connection", "connected", "disconnected", "peripheral_status_listener",
+            "led_scheduled_render_queue", "effective_desired", "led_scheduled_start", "led_scheduled_get_desired",
+            "publish_locked", "led_scheduled_set_brightness", "set_state_locked",
+            "led_scheduled_set_state", "led_scheduled_set_presentation", "led_scheduled_request",
+            "led_scheduled_activity", "led_scheduled_endpoint", "led_scheduled_pm_prepare", "led_scheduled_pm",
+            "led_scheduled_render_begin", "led_scheduled_render_end",
+        )
+        harness_path = root / "tests/native/scheduled_harness.c"
+        unit, _ = render_fixture("led_scheduled_sync.c", adapter_functions, (), harness_path)
+        controller_source = (source_dir / "behavior_led_pattern.c").read_text(encoding="utf-8")
+        controller = []
+        for name in ("schedule_pattern_work", "elapsed_since", "split_status_sample",
+                     *without(curves, "pattern_clock", "hold_to_wall_ms"), "write_led",
+                     "pattern_work_handler", "refresh_pattern_output", "led_pattern_pm_action"):
+            first, _last, text = definition(controller_source, name)
+            controller.append(f'#line {first} "{source_dir / "behavior_led_pattern.c"}"\n'
+                              f'__attribute__((unused)) {text}')
+        marker = "/* DRIVER_CONTROLLER_FUNCTIONS */"
+        resume = unit.count("\n", 0, unit.index(marker)) + 2
+        unit = unit.replace(marker, "\n".join(controller) +
+                            f'\n#line {resume} "{harness_path}"')
+        output.write_text(unit, encoding="utf-8")
+        raise SystemExit(0)
+    fixture_name = "settings_presentation" if sys.argv[1] == "--settings-presentation" else "settings_interleaving"
+    _, file_name, gated, support = next(row for row in fixtures if row[0] == fixture_name)
+    harness_path = root / "tests/runtime" / f"{fixture_name}_harness.c"
+    unit, _ = render_fixture(file_name, gated, support, harness_path)
+    if fixture_name == "settings_presentation":
+        unit = presentation_adapter(unit, harness_path)
+    output.write_text(unit, encoding="utf-8")
+    raise SystemExit(0)
+
+missing_functions = ungated_functions()
+if missing_functions:
+    raise RuntimeError("functions no fixture gates:\n  " + "\n  ".join(missing_functions))
+
+for fixture, file_name, gated, support in fixtures:
+    harness_name = "settings" if fixture == "settings_legacy" else fixture
+    harness_path = root / "tests/runtime" / f"{harness_name}_harness.c"
+    generated, ranges = render_fixture(file_name, gated, support, harness_path)
+    if fixture == "settings_presentation":
+        generated = presentation_adapter(generated, harness_path)
     with tempfile.TemporaryDirectory(prefix=f"{fixture}-runtime-") as folder:
         work = pathlib.Path(folder)
         unit = work / "test.c"
-        unit.write_text(harness.replace(marker, "\n".join(functions) +
-                                        f'\n#line {resume} "{harness_path}"'), encoding="utf-8")
-        for variant, flags in (
-            ("optimized", ["-O2"]),
-            ("sanitized", ["-O1", "-g", "-fno-omit-frame-pointer",
-                           "-fsanitize=address,undefined", "-fno-sanitize-recover=all"]),
-            ("coverage", ["-O0", "--coverage"]),
-        ):
+        unit.write_text(generated, encoding="utf-8")
+        for variant, flags in variants:
             binary = work / variant
+            api_flags = ["-DLED_SETTINGS_LEGACY_API=1"] if fixture == "settings_legacy" else []
+            if fixture == "settings_interleaving":
+                api_flags += ["-pthread"]
             subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", *flags,
+                            *api_flags,
                             "-I" + str(root / "include"), "-I" + str(source_dir),
                             "-I" + str(root / "tests/runtime"),
                             str(unit), *map(str, links), "-o", str(binary)],
                            check=True)
             subprocess.run([str(binary)], check=True)
+        if mode == "quick":
+            print(f"{fixture}: PASS (all scenarios, ASan/UBSan)")
+            continue
         subprocess.run(["gcov", "-b", "-c", "-o", str(work / "coverage-test.gcno"), str(unit)],
                        cwd=work, check=True, capture_output=True, text=True)
         report = (work / f"{file_name}.gcov").read_text(encoding="utf-8")

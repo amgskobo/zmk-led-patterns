@@ -60,8 +60,9 @@ static int led_battery_sample_fetch(const struct device *dev, enum sensor_channe
         return rc;
     }
 
-    /* Read after the fetch: the divider waits for its power switch to settle
-     * and samples at the end, so this is the duty the ADC just saw. */
+    /* Use the latest successful local LED write after the divider fetch.
+     * A concurrent PWM transition is not latched to the ADC acquisition;
+     * electrical accuracy around that edge requires board measurements. */
     const uint8_t duty = led_pattern_applied_brightness();
     struct sensor_value voltage;
 

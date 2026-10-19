@@ -40,8 +40,8 @@
 #define LED_PATTERN_RIPPLE        16
 #define LED_PATTERN_FADE_BLINK    17
 
-/* One past the last pattern. Add a pattern by raising this and adding its
- * curve; the cycling commands and the settings range both follow. */
+/* One past the last pattern. Extending this set also requires the protocol,
+ * schema and shared phase-period updates described in the README. */
 #define LED_PATTERN_COUNT 18
 
 /* &led_pattern: step to the previous or next pattern. Outside 0-17. */

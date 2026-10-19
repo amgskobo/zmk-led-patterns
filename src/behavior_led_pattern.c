@@ -17,12 +17,15 @@
 #include <zephyr/sys/util.h>
 
 #include <drivers/behavior.h>
+#include <zmk-led-patterns/events/state_changed.h>
+#include <zmk-led-patterns/led_pattern.h>
 #include <zmk/activity.h>
 #include <zmk/event_manager.h>
 #include <zmk/events/activity_state_changed.h>
 #include <zmk/workqueue.h>
-#include <zmk-led-patterns/led_pattern.h>
-#include <zmk-led-patterns/events/state_changed.h>
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+#include "led_scheduled_sync.h"
+#endif
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 #include <zmk/endpoints.h>
 #include <zmk/events/endpoint_changed.h>
@@ -39,7 +42,10 @@
 #include <zmk/events/split_peripheral_status_changed.h>
 #endif
 
-LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
+#ifndef CONFIG_ZMK_LED_PATTERNS_LOG_LEVEL
+#define CONFIG_ZMK_LED_PATTERNS_LOG_LEVEL 3
+#endif
+LOG_MODULE_REGISTER(zmk_led_patterns_behavior_led_pattern, CONFIG_ZMK_LED_PATTERNS_LOG_LEVEL);
 
 ZMK_EVENT_IMPL(zmk_led_pattern_state_changed);
 
@@ -49,15 +55,10 @@ BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 1,
              "declare exactly one zmk,behavior-led-pattern node");
 
 /*
- * The one clock left, and it runs only while a ramp is being drawn.
- *
- * Seventeen of the eighteen curves are step functions: they hold a level for a
- * known stretch and then change. Those say so, and the redraw is scheduled for
- * the moment they change -- a blink wakes twice a second, and the ten dark
- * seconds of Slow breathe are one sleep rather than four hundred. A ramp is
- * the one shape with no edges of its own, so it is the one shape that has to
- * be sampled, and 40 ms (25 steps a second) is fine enough that a three-second
- * fade reads as smooth.
+ * Curves report how long their current level can be held. Step sections wake
+ * at their next edge; the long dark section of Slow breathe sleeps throughout.
+ * Ramps are sampled every 40 ms (25 steps a second), so their fades remain
+ * smooth without waking for the sections whose output is constant.
  */
 #define RAMP_STEP_MS 40
 
@@ -75,11 +76,6 @@ BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 1,
 #define ADVERTISING_BLINK_BRIGHTNESS 70
 #define ADVERTISING_BLINK_OFF_BRIGHTNESS 0
 
-/* A settings apply writes a brightness and then a whole state, and dragging a
- * control in a client produces a stream of them. Coalescing into one message
- * is one radio event instead of many. */
-#define MIRROR_DEBOUNCE_MS 20
-
 static const struct device *const backlight = DEVICE_DT_GET(DT_CHOSEN(zmk_backlight));
 
 static void pattern_work_handler(struct k_work *work);
@@ -89,9 +85,9 @@ static void pattern_work_handler(struct k_work *work);
  * the first submit would overwrite the queue's own list node inside an item
  * already on the list. */
 static K_WORK_DELAYABLE_DEFINE(pattern_work, pattern_work_handler);
-/* The resting pattern, once the halves have synced and nothing else has been
- * asked for. On a split the first thing seen is never this -- the connection
- * indicator below owns the LED until the two halves agree. */
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT)
+/* Standalone presentation state. Split desired/rendered state belongs to the
+ * scheduled adapter and is never stored a second time here. */
 static uint8_t active_pattern = LED_PATTERN_BREATHE;
 static uint16_t speed_percent = LED_PATTERN_SPEED_NOMINAL;
 /* Kept here rather than delegated to ZMK's backlight subsystem: `&bl` carries
@@ -102,11 +98,12 @@ static bool advertising_indicator = true;
 /* Whether idle darkens the LED. The default is the cheap one. */
 static bool idle_off = true;
 static int64_t pattern_started_at;
-static bool controller_ready;
 static bool advertising_blink;
 /* Set while the animation is being held dark: ZMK reports the keyboard idle
  * and idle_off says to follow it. */
 static bool animation_suspended;
+#endif
+static bool controller_ready;
 /* This half's own view of ZMK's activity state, so the two inputs to that
  * decision can change independently -- an idle timeout, and a setting edited
  * while the keyboard is already idle. */
@@ -119,7 +116,8 @@ static atomic_t powering_off;
 static atomic_t applied_brightness;
 
 /*
- * Everything this module schedules runs on ZMK's low-priority queue.
+ * Standalone drawing and relay TX use ZMK's low-priority queue. Split drawing
+ * and reserved applies share a dedicated queue at the same low priority.
  *
  * Not the system work queue, which is where ZMK puts update_advertising_work
  * and raise_profile_changed_event_work -- the items that restart host
@@ -132,402 +130,26 @@ static atomic_t applied_brightness;
  * ordinary thread waits for a buffer.
  */
 static inline void schedule_pattern_work(k_timeout_t delay) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+    k_work_reschedule_for_queue(led_scheduled_render_queue(), &pattern_work, delay);
+#else
     k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &pattern_work, delay);
+#endif
 }
 
-/* Never negative: the table lookups index by elapsed/step, so a start stamp in
- * the future -- which only a malformed relayed phase could produce -- would
- * otherwise index before the front of a level table. */
+/* Never negative: table lookups index by elapsed/step, so a future start
+ * stamp must not index before the front of a level table. */
 static int64_t elapsed_since(int64_t started_at) {
     return MAX(k_uptime_get() - started_at, (int64_t)0);
 }
 
 static void refresh_pattern_output(void);
-static void schedule_mirror(k_timeout_t delay);
 static void apply_activity(void);
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 static bool should_show_advertising_blink(void);
 #endif
 
-/* ===== The two halves' connection, as three states and two messages ===== */
-
-#if IS_ENABLED(CONFIG_ZMK_SPLIT)
-
-/*
- * The LED says, at a glance, how far the pair has got.
- *
- *   WAITING  Blink,  as pattern 3   the other half is not there
- *   LINKED   Steady, as pattern 0   the BLE link is up, state not yet agreed
- *   SYNCED   released               the peripheral has confirmed what it is
- *                                   showing; the normal pattern takes over,
- *                                   whose default is 1 (Breathe)
- *
- * A pair that sticks on Steady is a pair whose link came up and whose state
- * exchange never completed, which is a different fault from one that never
- * linked -- and being able to tell those two apart from across the desk is the
- * whole reason this exists.
- *
- * The two shapes are drawn by split_status_sample() rather than by pattern id,
- * for a power reason spelled out there.
- */
-enum split_stage {
-    SPLIT_STAGE_WAITING = 0,
-    SPLIT_STAGE_LINKED,
-    SPLIT_STAGE_SYNCED,
-};
-
-/*
- * Timings for the state exchange.
- *
- * The link is reported as up before the central has discovered and subscribed
- * to the peripheral's relay characteristic, and a write sent before that is
- * dropped by the transport. Five seconds is comfortably past it, and it is
- * also long enough that Steady reads as a stage of its own rather than as a
- * flicker while someone is watching the pair come up. The exchange then runs
- * from five seconds to seven: five sends, half a second apart, and then the
- * LED is left saying "linked, never synced". The count is bounded, so nothing
- * here can become a loop.
- */
-#define SPLIT_SYNC_START_DELAY_MS 5000
-#define SPLIT_SYNC_ACK_TIMEOUT_MS 500
-#define SPLIT_SYNC_MAX_ATTEMPTS 5
-
-static enum split_stage split_stage = SPLIT_STAGE_WAITING;
-static int64_t split_stage_started_at;
-
-static bool split_status_showing(void) { return split_stage != SPLIT_STAGE_SYNCED; }
-
-static void set_split_stage(enum split_stage stage) {
-    if (stage == split_stage) {
-        return;
-    }
-
-    LOG_INF("led: split stage %d -> %d", (int)split_stage, (int)stage);
-    split_stage = stage;
-    split_stage_started_at = k_uptime_get();
-    /*
-     * The pattern clock is deliberately left alone.
-     *
-     * The indicator has its own clock (split_stage_started_at) and the pattern
-     * keeps running underneath it, unseen, from boot. Restarting the pattern
-     * here is what put the two halves out of phase at boot: the central
-     * advertised a phase measured before the reset and then reset itself when
-     * the acknowledgement arrived, so the peripheral came up
-     * SPLIT_SYNC_START_DELAY_MS into the curve while the central came up at
-     * zero. With Breathe's two-second period and a delay of three, five or
-     * seven seconds that lands exactly half a cycle out every time, which is
-     * why retuning the delay could never have fixed it.
-     */
-    refresh_pattern_output();
-}
-
-/*
- * Central to peripheral: the whole of what to show, as one small final-state
- * message. Not a remote behavior invocation -- the central does all the key
- * handling and the peripheral only redraws the exact values it receives.
- * `led` fits the four-byte relay name limit (three characters plus its NUL).
- */
-struct zmk_led_pattern_mirror {
-    uint8_t source;
-    uint8_t pattern;
-    uint8_t brightness;
-    uint16_t speed;
-    /* Milliseconds since the central began this pattern. Sending phase avoids
-     * restarting a breathing/blinking curve when a peripheral reconnects. */
-    uint32_t elapsed_ms;
-    bool advertising_blink;
-    bool idle_off;
-    /*
-     * Whether the central considers the keyboard in use.
-     *
-     * The two halves do not see the same key presses. ZMK resets activity from
-     * zmk_position_state_changed, and a peripheral's presses reach both halves
-     * -- its own locally, the central's copy over the split -- while a
-     * central's reach only the central. So a peripheral left to its own
-     * activity goes dark after CONFIG_ZMK_IDLE_TIMEOUT of someone typing on
-     * the other half. The central sees every press from both halves, which
-     * makes it the half worth believing.
-     */
-    bool central_active;
-} __packed;
-
-ZMK_EVENT_DECLARE(zmk_led_pattern_mirror);
-ZMK_EVENT_IMPL(zmk_led_pattern_mirror);
-
-/*
- * Peripheral to central: what it is actually showing now.
- *
- * This is what makes "synced" an observed fact rather than an assumption. The
- * central cannot otherwise know whether its write landed -- the transport
- * drops a relay write to a peripheral whose characteristics are not discovered
- * yet and says so only in a log line -- so without this the indicator could
- * only ever claim success. `lea` is three characters for the same reason
- * `led` is.
- *
- * It carries the phase the peripheral ended up on as well as the pattern, so
- * the central can log the skew between the two halves rather than leaving
- * "they look slightly out" as something only an eye can report.
- */
-struct zmk_led_pattern_ack {
-    uint8_t source;
-    uint8_t pattern;
-    uint32_t elapsed_ms;
-} __packed;
-
-ZMK_EVENT_DECLARE(zmk_led_pattern_ack);
-ZMK_EVENT_IMPL(zmk_led_pattern_ack);
-
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-ZMK_RELAY_EVENT_CENTRAL_TO_PERIPHERAL(zmk_led_pattern_mirror, led, source);
-ZMK_RELAY_EVENT_HANDLE(zmk_led_pattern_ack, lea, source);
-#else
-ZMK_RELAY_EVENT_HANDLE(zmk_led_pattern_mirror, led, source);
-ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(zmk_led_pattern_ack, lea, source);
-#endif
-
-#endif // IS_ENABLED(CONFIG_ZMK_SPLIT)
-
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-
-/*
- * Whether there is a peripheral to talk to, learned from the event rather than
- * asked for on a timer.
- *
- * bt_conn callbacks are a list, so a second registration here does not
- * displace ZMK's own. A link this half opened is one where it holds the
- * central role, which is exactly ZMK's own test for "not a host connection"
- * in ble.c.
- */
-static bool peripheral_link_up;
-static uint8_t sync_attempts;
-
-static void mirror_work_handler(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(mirror_work, mirror_work_handler);
-
-/*
- * A link this half opened is one where it holds the central role, which is
- * exactly ZMK's own test for "not a host connection" in ble.c. The role is
- * logged either way: if the indicator is stuck on the waiting blink, the
- * question is whether no connection is happening at all or whether one is
- * happening and being filtered out here, and only a log can tell those apart.
- */
-static bool is_peripheral_conn(struct bt_conn *conn, const char *what, uint8_t err) {
-    struct bt_conn_info info;
-
-    if (bt_conn_get_info(conn, &info) != 0) {
-        LOG_WRN("led: %s for a connection with no info", what);
-        return false;
-    }
-
-    const bool is_peripheral_link = info.role == BT_CONN_ROLE_CENTRAL;
-    LOG_INF("led: %s, role %d (%s), status %u", what, (int)info.role,
-            is_peripheral_link ? "split peer" : "host", err);
-
-    return is_peripheral_link;
-}
-
-static void split_conn_connected(struct bt_conn *conn, uint8_t err) {
-    if (!is_peripheral_conn(conn, "connected", err) || err != 0) {
-        return;
-    }
-
-    peripheral_link_up = true;
-    sync_attempts = 0;
-    set_split_stage(SPLIT_STAGE_LINKED);
-    k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &mirror_work,
-                                K_MSEC(SPLIT_SYNC_START_DELAY_MS));
-}
-
-static void split_conn_disconnected(struct bt_conn *conn, uint8_t reason) {
-    if (!is_peripheral_conn(conn, "disconnected", reason)) {
-        return;
-    }
-
-    peripheral_link_up = false;
-    k_work_cancel_delayable(&mirror_work);
-    set_split_stage(SPLIT_STAGE_WAITING);
-}
-
-/*
- * Registered at run time rather than with BT_CONN_CB_DEFINE.
- *
- * Both are dispatched by notify_connected(), and the static form needs its
- * iterable-section entry to survive --gc-sections out of a module's own
- * archive. ZMK registers its own two sets of connection callbacks this way, in
- * ble.c and in the split central, so this is the path with proof behind it and
- * the static one is not worth the doubt.
- */
-static struct bt_conn_cb split_conn_callbacks = {
-    .connected = split_conn_connected,
-    .disconnected = split_conn_disconnected,
-};
-
-static void mirror_work_handler(struct k_work *work) {
-    ARG_UNUSED(work);
-
-    if (!peripheral_link_up || atomic_get(&powering_off)) {
-        return;
-    }
-
-    LOG_INF("led: mirroring pattern %u to the peripheral (attempt %u)", active_pattern,
-            sync_attempts + 1);
-
-    struct zmk_led_pattern_mirror event = {
-        .source = ZMK_RELAY_EVENT_SOURCE_SELF,
-        .pattern = active_pattern,
-        .brightness = brightness_percent,
-        .speed = speed_percent,
-        .elapsed_ms = (uint32_t)elapsed_since(pattern_started_at),
-        .advertising_blink = advertising_blink,
-        .idle_off = idle_off,
-        .central_active = activity_state == ZMK_ACTIVITY_ACTIVE,
-    };
-
-    raise_zmk_led_pattern_mirror(event);
-
-    /* Only the connect-time exchange retries, and only until it is answered.
-     * A mirror sent because the state changed is a single message: the
-     * peripheral is known to be listening by then. */
-    if (split_stage == SPLIT_STAGE_LINKED && ++sync_attempts < SPLIT_SYNC_MAX_ATTEMPTS) {
-        k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &mirror_work,
-                                    K_MSEC(SPLIT_SYNC_ACK_TIMEOUT_MS));
-    }
-}
-
-static int led_pattern_ack_listener(const zmk_event_t *eh) {
-    const struct zmk_led_pattern_ack *ack = as_zmk_led_pattern_ack(eh);
-
-    /* A locally raised ack would be this half's own relay send, which only the
-     * peripheral does. */
-    if (ack == NULL || ack->source == ZMK_RELAY_EVENT_SOURCE_SELF) {
-        return ZMK_EV_EVENT_BUBBLE;
-    }
-
-    /*
-     * Positive means the peripheral is ahead of this half. It is the one-way
-     * relay latency plus the ack's own trip, so a few tens of milliseconds is
-     * the floor; anything near a pattern period is a real fault.
-     */
-    LOG_INF("led: peripheral %u acknowledged pattern %u, phase skew %d ms", ack->source,
-            ack->pattern, (int)(ack->elapsed_ms - elapsed_since(pattern_started_at)));
-
-    /* Only the connect-time exchange is cancelled, and only while it is still
-     * the thing running. Every mirror is acknowledged, including the ones sent
-     * because the state changed, and cancelling on one of those would be a
-     * race against the next change's own pending send. */
-    if (split_stage != SPLIT_STAGE_SYNCED) {
-        k_work_cancel_delayable(&mirror_work);
-        sync_attempts = 0;
-        set_split_stage(SPLIT_STAGE_SYNCED);
-    }
-
-    return ZMK_EV_EVENT_BUBBLE;
-}
-
-ZMK_LISTENER(led_pattern_ack, led_pattern_ack_listener);
-ZMK_SUBSCRIPTION(led_pattern_ack, zmk_led_pattern_ack);
-
-#endif // IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-
-/*
- * Mirroring never happens on the caller's thread.
- *
- * A key press arrives on the behavior thread and a client's edit arrives on
- * the Studio RPC thread, and both of those end in a GATT write to the other
- * half. Handing the send to the low-priority queue keeps the split link off
- * threads that have a host waiting on them, and the shared delayable item
- * coalesces a burst into one message.
- */
-static void schedule_mirror(k_timeout_t delay) {
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    if (!controller_ready || !peripheral_link_up) {
-        return;
-    }
-
-    k_work_reschedule_for_queue(zmk_workqueue_lowprio_work_q(), &mirror_work, delay);
-#else
-    ARG_UNUSED(delay);
-#endif
-}
-
-#if IS_ENABLED(CONFIG_ZMK_SPLIT) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-
-/* What the central last said about activity. Only meaningful while the two are
- * synced, so the status listener below clears it when the link goes. */
-static bool central_active;
-
-/* The ack leaves on the low-priority queue rather than from the relay receive
- * path it is answering, which runs on the Bluetooth receive thread. */
-static void ack_work_handler(struct k_work *work) {
-    ARG_UNUSED(work);
-
-    struct zmk_led_pattern_ack event = {
-        .source = ZMK_RELAY_EVENT_SOURCE_SELF,
-        .pattern = active_pattern,
-        .elapsed_ms = (uint32_t)elapsed_since(pattern_started_at),
-    };
-
-    raise_zmk_led_pattern_ack(event);
-}
-
-static K_WORK_DEFINE(ack_work, ack_work_handler);
-
-static int led_pattern_mirror_listener(const zmk_event_t *eh) {
-    const struct zmk_led_pattern_mirror *event = as_zmk_led_pattern_mirror(eh);
-
-    /* A locally raised mirror would be this half's own relay send, which only
-     * the central does. A received one has source 0 (central) + 1. */
-    if (event == NULL || event->source == ZMK_RELAY_EVENT_SOURCE_SELF) {
-        return ZMK_EV_EVENT_BUBBLE;
-    }
-
-    active_pattern = event->pattern < LED_PATTERN_COUNT ? event->pattern : LED_PATTERN_STEADY;
-    brightness_percent = MIN(100, event->brightness);
-    speed_percent = CLAMP(event->speed, LED_PATTERN_SPEED_MIN, LED_PATTERN_SPEED_MAX);
-    advertising_blink = event->advertising_blink;
-    idle_off = event->idle_off;
-    central_active = event->central_active;
-
-    set_split_stage(SPLIT_STAGE_SYNCED);
-    /* Before the phase, because un-suspending restarts the clock and the
-     * relayed phase has to be the last word on this half. */
-    apply_activity();
-    /* The only writer of this half's pattern clock, and the reason a stage
-     * change must not touch it. What is left over is the one-way relay
-     * latency: the send itself, and however long the split link waits for a
-     * connection event it is allowed to skip. */
-    pattern_started_at = k_uptime_get() - event->elapsed_ms;
-
-    refresh_pattern_output();
-    k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &ack_work);
-
-    return ZMK_EV_EVENT_BUBBLE;
-}
-
-ZMK_LISTENER(led_pattern_mirror, led_pattern_mirror_listener);
-ZMK_SUBSCRIPTION(led_pattern_mirror, zmk_led_pattern_mirror);
-
-static int led_pattern_peripheral_status_listener(const zmk_event_t *eh) {
-    const struct zmk_split_peripheral_status_changed *status =
-        as_zmk_split_peripheral_status_changed(eh);
-
-    if (status != NULL) {
-        /* Back to the indicator on either edge: a reconnect has to re-agree
-         * the state rather than keep showing what the last session left. And
-         * with no link there is nothing to believe about the other half, so
-         * this one falls back to its own idle timer. */
-        central_active = false;
-        set_split_stage(status->connected ? SPLIT_STAGE_LINKED : SPLIT_STAGE_WAITING);
-        apply_activity();
-    }
-    return ZMK_EV_EVENT_BUBBLE;
-}
-
-ZMK_LISTENER(led_pattern_peripheral_status, led_pattern_peripheral_status_listener);
-ZMK_SUBSCRIPTION(led_pattern_peripheral_status, zmk_split_peripheral_status_changed);
-
-#endif // split peripheral
-
+/* Split timing, relay and session state live in led_scheduled_sync.c. */
 /* ===== The eighteen curves, each able to say when it next changes ===== */
 
 /*
@@ -599,13 +221,11 @@ static uint32_t ramp_hold(uint32_t phase, uint32_t segment_end) {
  * because something is wrong and may therefore last a very long time. Steady
  * is free for the same reason, and schedules nothing at all.
  */
-static struct pattern_sample split_status_sample(int64_t elapsed_ms) {
+static struct pattern_sample split_status_sample(enum led_sync_stage stage, int64_t elapsed_ms) {
     static const struct pattern_segment waiting[] = {{500, 100}, {1000, 0}};
-
-    if (split_stage == SPLIT_STAGE_LINKED) {
+    if (stage == LED_SYNC_LINKED) {
         return (struct pattern_sample){.brightness = 100, .hold_ms = 0};
     }
-
     return SEGMENT_SAMPLE(waiting, elapsed_ms);
 }
 #endif
@@ -620,7 +240,10 @@ static struct pattern_sample triangular_sample(int64_t elapsed_ms) {
 
 static struct pattern_sample heartbeat_sample(int64_t elapsed_ms) {
     static const struct pattern_segment segments[] = {
-        {100, 100}, {200, 8}, {300, 65}, {1200, 5},
+        {100, 100},
+        {200, 8},
+        {300, 65},
+        {1200, 5},
     };
 
     return SEGMENT_SAMPLE(segments, elapsed_ms);
@@ -647,14 +270,15 @@ static struct pattern_sample triple_flash_sample(int64_t elapsed_ms) {
 }
 
 static struct pattern_sample sos_sample(int64_t elapsed_ms) {
-    /* Morse SOS: ... --- ... ; a unit is 100 ms and one frame is 2.8 s. The
+    /* Morse SOS: ... --- ... ; a unit is 100 ms and one frame is 3.4 s. The
      * seven trailing units are the gap before the message repeats. */
-    static const uint8_t units[] = {
-        100, 3, 100, 3, 100, 3, 3, 3, 100, 3, 100, 3, 100, 3,
-        3,   3, 100, 3, 100, 3, 100, 3, 3,  3, 3,   3, 3,   3,
+    static const struct pattern_segment segments[] = {
+        {100, 100},  {200, 3},  {300, 100},  {400, 3},  {500, 100},  {800, 3},
+        {1100, 100}, {1200, 3}, {1500, 100}, {1600, 3}, {1900, 100}, {2200, 3},
+        {2300, 100}, {2400, 3}, {2500, 100}, {2600, 3}, {2700, 100}, {3400, 3},
     };
 
-    return TABLE_SAMPLE(units, 100, elapsed_ms);
+    return SEGMENT_SAMPLE(segments, elapsed_ms);
 }
 
 static struct pattern_sample candle_sample(int64_t elapsed_ms) {
@@ -685,9 +309,8 @@ static struct pattern_sample slow_breathe_sample(int64_t elapsed_ms) {
                                        .hold_ms = ramp_hold(phase, 3000)};
     }
     if (phase < 6000) {
-        return (struct pattern_sample){
-            .brightness = 100 - (uint8_t)(((phase - 3000) * 100) / 3000),
-            .hold_ms = ramp_hold(phase, 6000)};
+        return (struct pattern_sample){.brightness = 100 - (uint8_t)(((phase - 3000) * 100) / 3000),
+                                       .hold_ms = ramp_hold(phase, 6000)};
     }
 
     /* Leave the LED completely off for ten seconds before the next breath --
@@ -704,7 +327,10 @@ static struct pattern_sample strobe_sample(int64_t elapsed_ms) {
 
 static struct pattern_sample double_beacon_sample(int64_t elapsed_ms) {
     static const struct pattern_segment segments[] = {
-        {70, 100}, {180, 3}, {250, 100}, {1600, 3},
+        {70, 100},
+        {180, 3},
+        {250, 100},
+        {1600, 3},
     };
 
     return SEGMENT_SAMPLE(segments, elapsed_ms);
@@ -798,20 +424,16 @@ static struct pattern_sample pattern_sample_at(uint8_t pattern, int64_t elapsed_
 
 /* ===== Output ===== */
 
-static void write_led(uint8_t percent) {
-    /* The work item is defined at compile time, so a redraw can in principle
-     * be queued before the LED device has finished initialising; this behavior
-     * and that device share an init priority, so their order is undefined. */
-    if (!device_is_ready(backlight)) {
-        return;
-    }
-
-    /* The selected board configuration has one PWM LED child (index 0). */
-    if (led_set_brightness(backlight, LED_INDEX, percent) == 0) {
-        atomic_set(&applied_brightness, percent);
-    }
+static bool write_led(uint8_t percent) {
+    if (!device_is_ready(backlight))
+        return false;
+    if (led_set_brightness(backlight, LED_INDEX, percent) != 0)
+        return false;
+    atomic_set(&applied_brightness, percent);
+    return true;
 }
 
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT)
 /*
  * The pattern says what shape and this behavior supplies its current ceiling.
  * It deliberately does not go through ZMK's backlight behavior, whose own
@@ -843,81 +465,82 @@ static uint32_t hold_to_wall_ms(uint32_t hold_ms) {
 
     return (uint32_t)CLAMP(wall, 1, UINT32_MAX);
 }
+#endif
 
 static void pattern_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
-
-    if (atomic_get(&powering_off)) {
+    if (atomic_get(&powering_off))
+        return;
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+    struct led_scheduled_view view;
+    led_scheduled_render_begin(&view); /* Commit due reservation before any old animation draw. */
+    if (!view.normal) {
+        if ((view.values.flags & (LED_SYNC_IDLE_OFF | LED_SYNC_ACTIVE)) == LED_SYNC_IDLE_OFF) {
+            write_led(0);
+            return;
+        }
+        const struct pattern_sample status =
+            split_status_sample(view.stage, elapsed_since(view.status_started_at));
+        write_led(status.brightness);
+        if (status.hold_ms)
+            schedule_pattern_work(K_MSEC(status.hold_ms));
         return;
     }
-
+    const bool suspended =
+        (view.values.flags & (LED_SYNC_IDLE_OFF | LED_SYNC_ACTIVE)) == LED_SYNC_IDLE_OFF;
+    const uint8_t brightness = view.values.brightness;
+    if (suspended || brightness == 0) {
+        bool ok = write_led(0);
+        led_scheduled_render_end(view.applied_sequence, ok);
+        return;
+    }
+    const uint64_t elapsed_ms = view.elapsed_ms;
+    const bool advertising = (view.values.flags & LED_SYNC_ADVERTISING) != 0;
+#else
     if (animation_suspended) {
         write_led(0);
         return;
     }
-
-#if IS_ENABLED(CONFIG_ZMK_SPLIT)
-    if (split_status_showing()) {
-        /*
-         * The connection indicator is drawn at full brightness and nominal
-         * speed, ignoring both settings. It is a diagnostic: it has to look
-         * the same whatever the LED happens to be configured for, including
-         * a brightness of zero.
-         */
-        const struct pattern_sample status =
-            split_status_sample(elapsed_since(split_stage_started_at));
-
-        write_led(status.brightness);
-        if (status.hold_ms > 0) {
-            schedule_pattern_work(K_MSEC(status.hold_ms));
-        }
-        return;
-    }
-#endif
-
-    /*
-     * Brightness zero is the LED's low-power state, not merely a dark pattern.
-     * Every level below is scaled by the brightness, so there would be nothing
-     * to see; what would be left is the cost of the redraws themselves -- a
-     * ramp wakes every RAMP_STEP_MS. One zero write lets the PWM peripheral
-     * stop, and nothing is scheduled: raising the brightness goes through
-     * refresh_pattern_output(), which runs this handler again, and the curve
-     * picks up wherever the pattern clock has got to.
-     */
     if (brightness_percent == 0) {
         write_led(0);
         return;
     }
-
     const int64_t elapsed_ms = elapsed_since(pattern_started_at);
+    const bool advertising = advertising_blink;
+#endif
     struct pattern_sample sample;
     uint32_t delay_ms;
-
-    if (advertising_blink) {
-        /* The status blink keeps its own fixed rate. It says something about
-         * the connection, so it has to stay recognisable whatever speed the
-         * patterns happen to be set to -- which is also why it is sampled on
-         * the wall clock and its hold is not scaled. */
+    if (advertising) {
         static const struct pattern_segment segments[] = {
             {ADVERTISING_BLINK_ON_MS, ADVERTISING_BLINK_BRIGHTNESS},
             {ADVERTISING_BLINK_PERIOD_MS, ADVERTISING_BLINK_OFF_BRIGHTNESS},
         };
-
         sample = SEGMENT_SAMPLE(segments, elapsed_ms);
         delay_ms = sample.hold_ms;
     } else {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+        /* 2827440000 is the LCM of all18 curve periods. Multiplying its
+         * 100x wall-clock repeat by any supported speed fits int64_t and
+         * preserves the exact floor((elapsed*speed)/100) curve phase. */
+        const int64_t scaled =
+            (int64_t)((elapsed_ms % UINT64_C(282744000000)) * view.values.speed / 100);
+        sample = pattern_sample_at(view.values.pattern, scaled);
+        delay_ms = sample.hold_ms
+                       ? MAX(1U, (uint32_t)((uint64_t)sample.hold_ms * 100 / view.values.speed))
+                       : 0;
+#else
         sample = pattern_sample_at(active_pattern, pattern_clock(elapsed_ms));
         delay_ms = sample.hold_ms == 0 ? 0 : hold_to_wall_ms(sample.hold_ms);
+#endif
     }
-
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+    bool ok = write_led((sample.brightness * brightness) / 100);
+    led_scheduled_render_end(view.applied_sequence, ok);
+#else
     set_led_brightness(sample.brightness);
-
-    /* The whole of the animation loop, and it is not a loop: the next wake-up
-     * is the moment this level stops being right, and a level that never stops
-     * being right is not scheduled at all. */
-    if (delay_ms > 0) {
+#endif
+    if (delay_ms > 0)
         schedule_pattern_work(K_MSEC(delay_ms));
-    }
 }
 
 /*
@@ -960,24 +583,17 @@ static void refresh_pattern_output(void) {
  * already idle and the LED has to come back on without waiting for a key.
  */
 static void apply_activity(void) {
-    bool in_use = activity_state == ZMK_ACTIVITY_ACTIVE;
-#if IS_ENABLED(CONFIG_ZMK_SPLIT) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    /* Either half's word is enough. The central's covers typing that never
-     * reaches here; this half's own covers its keys without waiting for a
-     * relay, and covers the case where there is no central to ask. */
-    in_use = in_use || central_active;
-#endif
-    const bool suspend = idle_off && !in_use;
-
-    if (suspend == animation_suspended) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+    led_scheduled_activity(activity_state == ZMK_ACTIVITY_ACTIVE);
+#else
+    const bool suspend = idle_off && activity_state != ZMK_ACTIVITY_ACTIVE;
+    if (suspend == animation_suspended)
         return;
-    }
-
     animation_suspended = suspend;
-    if (!suspend) {
+    if (!suspend)
         pattern_started_at = k_uptime_get();
-    }
     refresh_pattern_output();
+#endif
 }
 
 static int led_pattern_activity_listener(const zmk_event_t *eh) {
@@ -989,9 +605,6 @@ static int led_pattern_activity_listener(const zmk_event_t *eh) {
 
     activity_state = event->state;
     apply_activity();
-    /* Twice per idle cycle, and the mirror carries the pattern's phase with
-     * it, so a wake re-agrees the curve as well as the fact of being awake. */
-    schedule_mirror(K_MSEC(MIRROR_DEBOUNCE_MS));
 
     return ZMK_EV_EVENT_BUBBLE;
 }
@@ -1005,48 +618,88 @@ ZMK_SUBSCRIPTION(led_pattern_activity, zmk_activity_state_changed);
  * right now. Only used to make the log line say so. */
 static const char *masking_indicator(void) {
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
-    if (split_status_showing()) {
-        return " (masked by the split connection indicator)";
-    }
-#endif
+    return " (scheduled split presentation)";
+#else
     return advertising_blink ? " (masked by the advertising indicator)" : "";
+#endif
 }
 
 void led_pattern_get_state(struct led_pattern_state *out) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+    struct led_sync_values desired;
+    led_scheduled_get_desired(&desired);
+    *out = (struct led_pattern_state){.pattern = desired.pattern,
+                                      .speed = desired.speed,
+                                      .advertising_indicator =
+                                          (desired.flags & LED_SYNC_INDICATOR) != 0,
+                                      .idle_off = (desired.flags & LED_SYNC_IDLE_OFF) != 0};
+#else
     out->pattern = active_pattern;
     out->speed = speed_percent;
     out->advertising_indicator = advertising_indicator;
     out->idle_off = idle_off;
+#endif
 }
 
-uint8_t led_pattern_get_brightness(void) { return brightness_percent; }
+uint8_t led_pattern_get_brightness(void) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+    struct led_sync_values desired;
+    led_scheduled_get_desired(&desired);
+    return desired.brightness;
+#else
+    return brightness_percent;
+#endif
+}
 uint8_t led_pattern_applied_brightness(void) { return (uint8_t)atomic_get(&applied_brightness); }
 
 static void notify_state_changed(void) {
     if (controller_ready) {
-        raise_zmk_led_pattern_state_changed(((struct zmk_led_pattern_state_changed){
-            .pattern = active_pattern, .brightness = brightness_percent, .speed = speed_percent}));
+        struct led_pattern_state state;
+        led_pattern_get_state(&state);
+        raise_zmk_led_pattern_state_changed(
+            ((struct zmk_led_pattern_state_changed){.pattern = state.pattern,
+                                                    .brightness = led_pattern_get_brightness(),
+                                                    .speed = state.speed}));
     }
 }
 
 void led_pattern_set_brightness(uint8_t brightness) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+    if (led_scheduled_set_brightness(brightness))
+        notify_state_changed();
+#else
     const uint8_t next = MIN(100, brightness);
     if (next == brightness_percent) {
         return;
     }
     brightness_percent = next;
     refresh_pattern_output();
-    schedule_mirror(K_MSEC(MIRROR_DEBOUNCE_MS));
     notify_state_changed();
+#endif
 }
 
-void led_pattern_set_state(const struct led_pattern_state *state) {
+static void set_presentation(const struct led_pattern_state *state, bool replace_brightness,
+                             uint8_t brightness) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+    const bool changed = replace_brightness
+                             ? led_scheduled_set_presentation(state, brightness)
+                             : led_scheduled_set_state(state);
+    if (changed)
+        notify_state_changed();
+    LOG_INF("led: desired state pattern %u speed %u brightness %u%%%s",
+            led_pattern_field_value(LED_PATTERN_FIELD_PATTERN),
+            led_pattern_field_value(LED_PATTERN_FIELD_SPEED), led_pattern_get_brightness(),
+            masking_indicator());
+#else
     const uint8_t pattern =
         state->pattern < LED_PATTERN_COUNT ? state->pattern : LED_PATTERN_STEADY;
     const bool pattern_changed = pattern != active_pattern;
     const uint16_t speed = CLAMP(state->speed, LED_PATTERN_SPEED_MIN, LED_PATTERN_SPEED_MAX);
-    const bool shown_changed = pattern_changed || speed != speed_percent;
+    const uint8_t next_brightness = replace_brightness ? MIN(100, brightness) : brightness_percent;
+    const bool shown_changed = pattern_changed || speed != speed_percent ||
+                               next_brightness != brightness_percent;
 
+    brightness_percent = next_brightness;
     active_pattern = pattern;
     speed_percent = speed;
     advertising_indicator = state->advertising_indicator;
@@ -1075,21 +728,30 @@ void led_pattern_set_state(const struct led_pattern_state *state) {
             brightness_percent, masking_indicator());
 
     refresh_pattern_output();
-    schedule_mirror(K_MSEC(MIRROR_DEBOUNCE_MS));
     if (shown_changed) {
         notify_state_changed();
     }
+#endif
 }
 
-/* A BLE peripheral has no host endpoint or active host profile. It still
- * executes the same GLOBAL behavior locally, but endpoint state belongs only
- * to the central (or to a non-split build). */
+void led_pattern_set_state(const struct led_pattern_state *state) {
+    set_presentation(state, false, 0);
+}
+
+void led_pattern_set_presentation(const struct led_pattern_state *state, uint8_t brightness) {
+    set_presentation(state, true, brightness);
+}
+
+/* A BLE peripheral renders scheduled presentations without a host endpoint
+ * or active host profile. Host endpoint indication belongs to the central
+ * (or to a non-split build); behavior intents use central locality. */
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 static bool should_show_advertising_blink(void) {
 #if IS_ENABLED(CONFIG_ZMK_BLE)
     const struct zmk_endpoint_instance endpoint = zmk_endpoint_get_selected();
-
-    return advertising_indicator && endpoint.transport == ZMK_TRANSPORT_NONE &&
+    struct led_pattern_state state;
+    led_pattern_get_state(&state);
+    return state.advertising_indicator && endpoint.transport == ZMK_TRANSPORT_NONE &&
            !zmk_ble_active_profile_is_connected();
 #else
     return false;
@@ -1097,10 +759,13 @@ static bool should_show_advertising_blink(void) {
 }
 
 static void refresh_connection_state(void) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+    led_scheduled_endpoint(should_show_advertising_blink());
+#else
     advertising_blink = should_show_advertising_blink();
     pattern_started_at = k_uptime_get();
     refresh_pattern_output();
-    schedule_mirror(K_MSEC(MIRROR_DEBOUNCE_MS));
+#endif
 }
 
 #if IS_ENABLED(CONFIG_ZMK_BLE)
@@ -1140,13 +805,15 @@ ZMK_SUBSCRIPTION(led_pattern_endpoint, zmk_endpoint_changed);
 bool led_pattern_ready(void) { return device_is_ready(backlight); }
 
 int32_t led_pattern_field_value(enum led_pattern_field field) {
+    struct led_pattern_state state;
+    led_pattern_get_state(&state);
     switch (field) {
     case LED_PATTERN_FIELD_PATTERN:
-        return active_pattern;
+        return state.pattern;
     case LED_PATTERN_FIELD_BRIGHTNESS:
-        return brightness_percent;
+        return led_pattern_get_brightness();
     case LED_PATTERN_FIELD_SPEED:
-        return speed_percent;
+        return state.speed;
     default:
         return 0;
     }
@@ -1155,6 +822,10 @@ int32_t led_pattern_field_value(enum led_pattern_field field) {
 /* Straight onto the LED: for a build with no settings to own the value, and
  * for the rare write the settings refuse. */
 static void apply_request(enum led_pattern_field field, int32_t value) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+    if (led_scheduled_request(field, value))
+        notify_state_changed();
+#else
     struct led_pattern_state state;
 
     if (field == LED_PATTERN_FIELD_BRIGHTNESS) {
@@ -1169,9 +840,13 @@ static void apply_request(enum led_pattern_field field, int32_t value) {
         state.speed = (uint16_t)CLAMP(value, LED_PATTERN_SPEED_MIN, LED_PATTERN_SPEED_MAX);
     }
     led_pattern_set_state(&state);
+#endif
 }
 
 void led_pattern_request(enum led_pattern_field field, int32_t value) {
+    if (field != LED_PATTERN_FIELD_BRIGHTNESS && field != LED_PATTERN_FIELD_PATTERN &&
+        field != LED_PATTERN_FIELD_SPEED)
+        return;
 #if IS_ENABLED(CONFIG_ZMK_LED_PATTERNS_CUSTOM_SETTINGS)
     /* The setting is the owner: its change event is what reaches the LED. */
     if (led_pattern_settings_store(field, value) == 0) {
@@ -1290,28 +965,18 @@ static const struct behavior_driver_api behavior_led_pattern_driver_api = {
 
 static int behavior_led_pattern_init(const struct device *dev) {
     ARG_UNUSED(dev);
-    controller_ready = true;
     activity_state = zmk_activity_get_state();
-    animation_suspended = idle_off && activity_state != ZMK_ACTIVITY_ACTIVE;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
-    /* Both halves come up on the waiting indicator, and neither leaves it
-     * until the state exchange has actually been acknowledged. */
-    split_stage_started_at = k_uptime_get();
+    led_scheduled_start(refresh_pattern_output);
+#else
+    animation_suspended = idle_off && activity_state != ZMK_ACTIVITY_ACTIVE;
 #endif
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    /* Before bt_enable(): registering a connection callback is an slist
-     * append, and this init runs at POST_KERNEL, ahead of every APPLICATION
-     * init including Bluetooth's. */
-    int err = bt_conn_cb_register(&split_conn_callbacks);
-    if (err < 0) {
-        LOG_ERR("led: failed to register split connection callbacks (%d)", err);
-    }
-#endif
+    controller_ready = true;
+    apply_activity();
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     refresh_connection_state();
-#else
-    refresh_pattern_output();
 #endif
+    refresh_pattern_output();
     return 0;
 }
 
@@ -1350,17 +1015,24 @@ static int led_pattern_pm_action(const struct device *dev, enum pm_device_action
         if (atomic_set(&powering_off, 1) != 0) {
             return 0;
         }
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+        led_scheduled_pm_prepare(); /* Fence RX/TX before any potentially blocked driver call. */
+#endif
         k_work_cancel_delayable_sync(&pattern_work, &sync);
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-        k_work_cancel_delayable_sync(&mirror_work, &sync);
+        /* Darken before waiting for a potentially blocked transport worker. */
+        write_led(0);
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+        led_scheduled_pm(true);
 #endif
         /* Driven to zero rather than released: a pin let go while high
          * leaves a transistor's gate charged, and the LED behind it lit. */
-        write_led(0);
         return 0;
     }
     case PM_DEVICE_ACTION_RESUME:
         if (atomic_clear(&powering_off) != 0) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+            led_scheduled_pm(false);
+#endif
             refresh_pattern_output();
         }
         return 0;
@@ -1376,9 +1048,8 @@ static int led_pattern_pm_init(const struct device *dev) {
 
 PM_DEVICE_DEFINE(led_pattern_pm, led_pattern_pm_action);
 
-DEVICE_DEFINE(led_pattern_pm, "led_pattern_pm", led_pattern_pm_init,
-              PM_DEVICE_GET(led_pattern_pm), NULL, NULL, POST_KERNEL,
-              CONFIG_ZMK_LED_PATTERNS_PM_INIT_PRIORITY, NULL);
+DEVICE_DEFINE(led_pattern_pm, "led_pattern_pm", led_pattern_pm_init, PM_DEVICE_GET(led_pattern_pm),
+              NULL, NULL, POST_KERNEL, CONFIG_ZMK_LED_PATTERNS_PM_INIT_PRIORITY, NULL);
 
 PM_DEVICE_DEFINE(led_pattern_pm_late, led_pattern_pm_action);
 

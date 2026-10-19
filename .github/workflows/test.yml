@@ -20,22 +20,92 @@ concurrency:
   group: test-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+env:
+  ZMK_TEST_MODE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full' || 'quick' }}
+  ZMK_TEST_IMAGE: zmkfirmware/zmk-build-arm@sha256:edb1c953438c6f720ddb79c3762f3972013b7fbbaf4fff3592fc869983e7afc5
+
 jobs:
   host:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - name: Exercise the helpers and every lifted function with full coverage
-        run: bash ./tests/run-host-docker.sh
+      - name: Run every host scenario and wrapper lifecycle assertion
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir ci-results
+          bash tests/run-host-docker.sh 2>&1 | tee ci-results/host.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: led-host-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: error
   firmware:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        variant: [upstream, dya]
+        include:
+          - variant: upstream
+            role: standalone
+          - variant: dya
+            role: standalone
+          - variant: dya
+            role: central
+          - variant: dya
+            role: peripheral
     steps:
       - uses: actions/checkout@v5
-      - name: Build the ${{ matrix.variant }} ZMK firmware fixture
-        run: bash ./tests/run-integration-docker.sh ${{ matrix.variant }}
+      - name: Build and validate ${{ matrix.variant }} ${{ matrix.role }}
+        shell: bash
+        env:
+          ZMK_TEST_LED_ROLE: ${{ matrix.role }}
+          ZMK_TEST_OUTPUT: ${{ github.workspace }}/ci-results/firmware
+        run: |
+          set -o pipefail
+          mkdir ci-results
+          bash tests/run-integration-docker.sh "${{ matrix.variant }}" 2>&1 | tee ci-results/firmware.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: led-${{ matrix.variant }}-${{ matrix.role }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-results/
+          include-hidden-files: true
+          if-no-files-found: error
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check out the exact native kernel backend
+        uses: actions/checkout@v5
+        with:
+          repository: zmkfirmware/zephyr
+          ref: 10ba6d0cb38bc3d258775d27982f707599320085
+          path: native-workspace/zephyr
+          persist-credentials: false
+      - name: Run both real-kernel roles three times without network access
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir ci-results
+          docker pull "$ZMK_TEST_IMAGE"
+          docker run --rm --pull never --network none \
+            --volume "$PWD:/src:ro" \
+            --volume "$PWD/native-workspace/zephyr:/workspace/zephyr:ro" \
+            --volume "$PWD/ci-results:/results:rw" \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/workspace/zephyr \
+            "$ZMK_TEST_IMAGE" /bin/bash /src/tests/native/run_scheduled.sh /workspace /results/native \
+            2>&1 | tee ci-results/native.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: led-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-results/
+          include-hidden-files: true
+          if-no-files-found: error

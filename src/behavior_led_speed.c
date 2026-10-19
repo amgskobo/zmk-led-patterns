@@ -16,7 +16,10 @@
 #include <zmk/behavior.h>
 #include <zmk-led-patterns/led_pattern.h>
 
-LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
+#ifndef CONFIG_ZMK_LED_PATTERNS_LOG_LEVEL
+#define CONFIG_ZMK_LED_PATTERNS_LOG_LEVEL 3
+#endif
+LOG_MODULE_REGISTER(zmk_led_patterns_behavior_led_speed, CONFIG_ZMK_LED_PATTERNS_LOG_LEVEL);
 
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 

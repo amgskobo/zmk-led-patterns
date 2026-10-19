@@ -10,6 +10,9 @@ if(CONFIG_ZMK_LED_PATTERNS)
     src/behavior_led_brightness.c
     src/behavior_led_speed.c
   )
+  if(CONFIG_ZMK_SPLIT)
+    target_sources(app PRIVATE src/led_scheduled_sync.c)
+  endif()
 endif()
 
 if(CONFIG_ZMK_LED_PATTERNS_BATTERY_ADC_OFFSET)
