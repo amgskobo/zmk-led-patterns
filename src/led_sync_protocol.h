@@ -100,7 +100,9 @@ struct led_sync_saved_presentation {
     uint64_t phase_floor, last_logical, rendered_at;
 };
 struct led_sync_engine {
-    struct led_sync_clock_fit fit, active_clock;
+    struct led_sync_clock_fit fit;
+    /* active.clock is the frozen presentation mapping; a candidate fit never
+     * changes it. Keep one copy with the plan so rollback restores both. */
     struct led_sync_plan pending, active;
     struct led_sync_saved_presentation previous;
     uint64_t phase_epoch, phase_floor, clock_due, clock_timeout, state_due;
@@ -226,7 +228,7 @@ static inline void led_sync_link(struct led_sync_engine *e, bool up, uint64_t no
     e->active_rendered = false;
     e->active_failure = 0;
     e->pending.valid = e->active.valid = false;
-    e->fit.valid = e->active_clock.valid = false;
+    e->fit.valid = e->active.clock.valid = false;
     e->peer_boot = e->peer_epoch = e->central_boot = e->central_epoch = 0;
     e->candidate_sequence = e->clock_sequence = e->sequence = 0;
     e->candidate_boot = e->candidate_epoch = e->candidate_peer_epoch = 0;
@@ -323,7 +325,7 @@ static inline bool led_sync_identity(const struct led_sync_engine *e,
 }
 static inline uint64_t led_sync_logical_raw(const struct led_sync_engine *e, uint64_t now) {
     uint64_t logical = now;
-    if (!e->central && !led_sync_clock_to_central(&e->active_clock, now, &logical))
+    if (!e->central && !led_sync_clock_to_central(&e->active.clock, now, &logical))
         return 0;
     return logical;
 }
@@ -332,7 +334,7 @@ static inline uint32_t led_sync_extra(const struct led_sync_engine *e,
     uint64_t old_time, new_time;
     if (e->central || !e->have_active)
         return 0;
-    if (!led_sync_clock_to_central(&e->active_clock, deadline, &old_time) ||
+    if (!led_sync_clock_to_central(&e->active.clock, deadline, &old_time) ||
         !led_sync_clock_to_central(fit, deadline, &new_time))
         return UINT32_MAX;
     if (old_time < e->last_logical)
@@ -354,7 +356,7 @@ static inline void led_sync_presentation_stage(struct led_sync_engine *e, uint64
         logical = floor;
     bool fresh = e->active.valid && e->active.sequence > e->resume_after_sequence &&
                  ahead <= UINT32_MAX &&
-                 led_sync_clock_valid_at(&e->active_clock, logical, (uint32_t)ahead);
+                 led_sync_clock_valid_at(&e->active.clock, logical, (uint32_t)ahead);
     bool confirmed = e->active_rendered && (!e->central || e->active.confirmed);
     e->stage = fresh ? (confirmed ? LED_SYNC_SYNCED : LED_SYNC_RUNNING_UNCONFIRMED)
                      : (confirmed ? LED_SYNC_COASTING : LED_SYNC_COASTING_UNCONFIRMED);
@@ -377,7 +379,6 @@ static inline void led_sync_install_active(struct led_sync_engine *e,
     e->active = *plan;
     e->active_rendered = false;
     e->active_failure = 0;
-    e->active_clock = plan->clock;
     e->visible = led_sync_wire_values(&plan->wire);
     e->phase_epoch = plan->wire.phase_epoch;
     e->have_active = true;
@@ -388,7 +389,6 @@ static inline void led_sync_install_active(struct led_sync_engine *e,
 static inline void led_sync_restore_previous(struct led_sync_engine *e, uint64_t now) {
     e->active = e->previous.active;
     e->visible = led_sync_wire_values(&e->active.wire);
-    e->active_clock = e->active.clock;
     e->phase_epoch = e->active.wire.phase_epoch;
     e->phase_floor = e->previous.phase_floor;
     e->last_logical = e->previous.last_logical;
@@ -791,13 +791,13 @@ static inline void led_sync_rendered(struct led_sync_engine *e, bool succeeded, 
     const bool late =
         now < e->active.local_deadline || now - e->active.local_deadline > LED_SYNC_LATE_MS;
     uint64_t logical = now;
-    bool mapped = e->central || led_sync_clock_to_central(&e->active_clock, now, &logical);
+    bool mapped = e->central || led_sync_clock_to_central(&e->active.clock, now, &logical);
     uint64_t floor = e->last_logical > e->phase_floor ? e->last_logical : e->phase_floor;
     uint64_t ahead = logical < floor ? floor - logical : 0;
     if (logical < floor)
         logical = floor;
     bool clock_valid = mapped && ahead <= UINT32_MAX &&
-                       led_sync_clock_valid_at(&e->active_clock, logical, (uint32_t)ahead);
+                       led_sync_clock_valid_at(&e->active.clock, logical, (uint32_t)ahead);
     uint8_t failure = !clock_valid ? LED_SYNC_REJECT_CLOCK
                       : late       ? LED_SYNC_REJECT_LATE
                       : !succeeded ? LED_SYNC_REJECT_RENDER
@@ -935,13 +935,13 @@ static inline uint64_t led_sync_next_render(const struct led_sync_engine *e, uin
                                                           ? UINT32_MAX
                                                           : (uint32_t)(e->last_logical - logical))
                                                    : 0;
-        uint64_t expiry = e->active_clock.reference_ms + 8000;
-        uint64_t base = (uint64_t)e->active_clock.base_error_ms + extra;
-        uint64_t quality = e->active_clock.reference_ms + (base >= 50 ? 1 : (50 - base) * 1000 + 1);
+        uint64_t expiry = e->active.clock.reference_ms + 8000;
+        uint64_t base = (uint64_t)e->active.clock.base_error_ms + extra;
+        uint64_t quality = e->active.clock.reference_ms + (base >= 50 ? 1 : (50 - base) * 1000 + 1);
         if (quality < expiry)
             expiry = quality;
         uint64_t local = expiry;
-        if (e->central || led_sync_clock_to_local(&e->active_clock, expiry, &local))
+        if (e->central || led_sync_clock_to_local(&e->active.clock, expiry, &local))
             if (local < next)
                 next = local;
     }

@@ -10,7 +10,7 @@
     "bash tests/run-host-docker.sh",
     "bash tests/run-integration-docker.sh",
     "ZMK_TEST_OFFLINE_WORKSPACE=/absolute/resolved/workspace ZMK_TEST_OUTPUT=/absolute/new/output bash tests/integration/run.sh upstream|dya",
-    "python3 -m unittest discover -v -s tests/integration -p test_registration.py",
+    "python3 -m unittest discover -v -s tests/integration -p 'test_*.py'",
     "bash tests/integration/validate.sh BUILD_ROOT upstream|dya ROLE FRESH_VALIDATION_OUTPUT [SETTINGS_MODULE]",
     "bash tests/native/run_scheduled.sh /absolute/resolved/workspace /absolute/fresh/output",
     "python3 tests/protocol_negative.py /absolute/fresh/output",

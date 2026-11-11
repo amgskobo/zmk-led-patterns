@@ -95,7 +95,7 @@ static void seed(struct led_sync_values old) {
     engine.clock_ready = true; engine.clock_sequence = engine.sequence = 4;
     engine.have_active = engine.active_rendered = true;
     engine.active = (struct led_sync_plan){.valid = true, .confirmed = true, .sequence = 3, .clock = engine.fit};
-    engine.active_clock = engine.fit; engine.visible = old;
+    engine.visible = old;
     engine.phase_epoch = 9000; engine.dirty = engine.reset_phase = false;
     engine.transaction_active = false; engine.stage = LED_SYNC_SYNCED;
 }

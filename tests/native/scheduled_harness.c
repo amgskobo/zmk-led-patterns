@@ -332,7 +332,7 @@ static void observe_apply_handler(struct k_work *work) {
     uint64_t now = k_uptime_get();
     uint64_t logical = led_sync_logical_raw(&engine, now);
     bool coasting = engine.have_active && !engine.suspended &&
-        (led_sync_coasting(&engine) || !led_sync_clock_valid_at(&engine.active_clock, logical, 0));
+        (led_sync_coasting(&engine) || !led_sync_clock_valid_at(&engine.active.clock, logical, 0));
     k_mutex_unlock(&sync_mutex);
     if (coasting)
         k_work_reschedule_for_queue(&render_queue, &apply_work, K_MSEC(1000));
@@ -498,7 +498,6 @@ static void established(struct led_sync_engine *state, bool central, uint64_t no
     state->stage = LED_SYNC_SYNCED;
     state->visible = values;
     zassert_true(led_sync_clock_sample(&state->fit, now, now, now, now, quantization));
-    state->active_clock = state->fit;
     state->active.valid = state->active.confirmed = true;
     state->active.sequence = 1;
     state->active.clock = state->fit;
@@ -1084,7 +1083,7 @@ ZTEST(led_scheduled_kernel, test_long_coast_refit_rebases_only_at_future_edge) {
                                                 engine.pending.wire.apply_at, 0));
             zassert_equal(engine.visible.brightness, 23);
             zassert_equal(engine.phase_epoch, old_phase, "receive rebased the running animation");
-            zassert_equal(engine.active_clock.offset_ms, 0, "receive replaced the active mapping");
+            zassert_equal(engine.active.clock.offset_ms, 0, "receive replaced the active mapping");
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
             uint32_t old_extra = led_sync_extra(&engine, &engine.pending.clock, deadline);
             printk("REFIT actual=%lld counterpart=%llu offset=%lld stale_floor_error=%u future=%llu\n",

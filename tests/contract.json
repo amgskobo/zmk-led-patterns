@@ -67,7 +67,7 @@
     },
     {
       "fixture": "tests/test_led_sync_protocol.c",
-      "asserts": "Two production engines,13 named scheduled state/session/clock/recovery families; receipt cannot apply, exact ACK, immutable latest-next, malformed/replay/same-ms challenge, unilateral rotation, completion late/quality/stage,30s continuous changes with bounded foreground fit/traffic; active expiry coasts and failed unchanged transactions exhaust silently"
+      "asserts": "Two production engines,13 named scheduled state/session/clock/recovery families; static engine budget792bytes on supported firmware/native ABIs; frozen active-plan clock remains independent of candidate fit and saved rollback plan; receipt cannot apply, exact ACK, immutable latest-next, malformed/replay/same-ms challenge, unilateral rotation, completion late/quality/stage,30s continuous changes with bounded foreground fit/traffic; active expiry coasts and failed unchanged transactions exhaust silently"
     },
     {
       "fixture": "tests/test_led_sync_wire.c",
@@ -120,6 +120,10 @@
     {
       "fixture": "tests/traffic_fixture.py",
       "asserts": "SHA-admit the27,634-byte periodic3 output fixture and provenance; no historical algorithm copy. Three historical parser slots are explicit fixture copies, never claimed as binary reruns."
+    },
+    {
+      "fixture": "tests/integration/test_validation.py",
+      "asserts": "Real firmware-validator source admission: actual resolved owner source reaches ELF inspection; unrelated checkout source rejects first. Synthetic artifacts and a stopping strings command exercise only this path boundary, never firmware acceptance. Real firmware matrix separately checks canonical owner and registry source paths."
     },
     {
       "fixture": "tests/test_integration_docker.py",

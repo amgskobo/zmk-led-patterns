@@ -163,6 +163,11 @@ dependency workspaces remain temporary and are cleaned separately. Without expli
 executable. `test_integration_lifecycle.py` uses failing west tools to check retained
 outputs, real exits and temporary-workspace cleanup. Both run in quick/full. They
 do not establish firmware success; the real firmware validator remains required.
+`integration/test_validation.py` checks the actual validator's source admission
+from the resolved owner checkout and rejection of an unrelated source path.
+Its synthetic artifacts stop before ELF inspection. Real firmware validation
+uses canonical owner/registry source paths, including a direct SDK checkout
+outside `/src` and a registry selected through a workspace symlink.
 
 CI dispatches these same entries: host quick on push/PR and full on manual/schedule;
 four real firmware jobs (stock standalone, DYA standalone/central/peripheral); and
@@ -186,7 +191,11 @@ The default quick/full entries also execute `test_led_sync_clock.c` and
 `test_led_sync_protocol.c`. Clock math covers checked signed conversion,
 asymmetric/queued samples, integer timestamp quantization, future-time quality,
 expiry and overflow. Protocol tests drive two instances of the production
-engine with raw ordered timestamps. Named cases cover future apply on both
+engine with raw ordered timestamps. The protocol fixture also bounds each
+engine to 792 bytes on the supported firmware/native ABIs: the active plan
+owns its frozen clock, while a candidate fit and saved rollback plan remain
+independent. The original duplicate-clock layout fails this storage assertion.
+Named cases cover future apply on both
 roles, immutable reservations/latest-next coalescing, malformed shape/session
 and sequence replay, same-ms candidate challenges, unilateral PM/session
 rotation, driver completion/late/quality failures, exact ACK identity,

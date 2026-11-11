@@ -213,7 +213,7 @@ static void test_expiry_quality_and_frozen_mapping(void) {
     peer.fit.upper_ms += 20;
     assert(peer.pending.local_deadline == deadline);
     assert(led_sync_advance(&peer, deadline));
-    assert(peer.active_clock.offset_ms == 10000 && peer.last_logical == 6085);
+    assert(peer.active.clock.offset_ms == 10000 && peer.last_logical == 6085);
     led_sync_rendered(&peer, true, deadline);
     (void)sent(&peer, deadline);
     uint64_t expiry = led_sync_next_render(&peer, deadline);
@@ -602,7 +602,16 @@ static void test_continuous_changes_refresh(void) {
     printf("continuous30s changes: fits=%u maxgap=%llu packets=%u queued=%u PASS\n", clocks,
            (unsigned long long)max_fit_gap, total, count);
 }
+static void test_storage_budget(void) {
+    /* Both supported firmware/native ABIs fit within this static engine budget.
+     * Presentation keeps its frozen clock in active.clock, independently of fit. */
+    assert(sizeof(struct led_sync_engine) <= 792);
+    assert(sizeof(struct led_sync_packet) == 64);
+    printf("led sync storage: engine=%zu fit=%zu bytes PASS\n",
+           sizeof(struct led_sync_engine), sizeof(struct led_sync_clock_fit));
+}
 int main(void) {
+    test_storage_budget();
     test_scheduled_and_desired();
     test_duplicate_reordered_and_shape();
     test_late_retry_and_boundaries();

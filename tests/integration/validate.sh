@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 # All build-result assertions, also usable on an already retained binary.
 set -euo pipefail
+repo_root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)"
 test "$#" -ge 4 && test "$#" -le 5 || {
     echo 'usage: validate.sh BUILD_ROOT upstream|dya ROLE FRESH_OUTPUT [SETTINGS_MODULE]' >&2
     exit 2
@@ -27,7 +28,7 @@ test -f "$build_root/zephyr/zmk.uf2"
 grep -q '^CONFIG_ZMK_LED_PATTERNS=y' "$build_root/zephyr/.config"
 grep -q '^CONFIG_ZMK_LED_PATTERNS_BATTERY_ADC_OFFSET=y' "$build_root/zephyr/.config"
 grep -q '^CONFIG_ZMK_LOW_PRIORITY_WORK_QUEUE=y' "$build_root/zephyr/.config"
-grep -Fq '/src/src/behavior_led_pattern.c' "$build_root/compile_commands.json"
+grep -Fq "$repo_root/src/behavior_led_pattern.c" "$build_root/compile_commands.json"
 if grep -q '^CONFIG_ZMK_BACKLIGHT=y' "$build_root/zephyr/.config"; then
     echo 'ZMK backlight unexpectedly enabled as a second LED owner' >&2; exit 1
 fi
@@ -58,12 +59,13 @@ else
     done
     grep -Fxq led.adv_blink "$output/strings.txt"
     test -n "$selected_settings"
+    selected_settings="$(CDPATH='' cd -- "$selected_settings" && pwd -P)"
     grep -Fq "$selected_settings/src/custom_settings.c" "$build_root/compile_commands.json"
 fi
 if [ "$role" != standalone ]; then
     grep -q '^CONFIG_ZMK_SPLIT=y' "$build_root/zephyr/.config"
     grep -q '^CONFIG_ZMK_SPLIT_RELAY_EVENT=y' "$build_root/zephyr/.config"
-    grep -Fq '/src/src/led_scheduled_sync.c' "$build_root/compile_commands.json"
+    grep -Fq "$repo_root/src/led_scheduled_sync.c" "$build_root/compile_commands.json"
     for symbol in led_scheduled_start led_scheduled_render_begin led_scheduled_render_end \
         led_scheduled_pm_prepare led_scheduled_request zmk_event_zmk_led_scheduled_wire \
         zmk_listener_led_scheduled_sync zmk_listener_zmk_led_scheduled_wire_relay_handle; do
@@ -88,7 +90,7 @@ if [ "$role" != standalone ]; then
         grep -Eq '[[:space:]]zmk_listener_led_scheduled_link$' "$output/defined-symbols.txt"
     fi
 else
-    if grep -Fq '/src/src/led_scheduled_sync.c' "$build_root/compile_commands.json"; then
+    if grep -Fq "$repo_root/src/led_scheduled_sync.c" "$build_root/compile_commands.json"; then
         echo 'split scheduled adapter unexpectedly compiled for standalone' >&2; exit 1
     fi
 fi

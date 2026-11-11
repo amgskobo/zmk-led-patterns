@@ -64,7 +64,7 @@ if [ "$mode" = full ]; then
 fi
 python3 "$repo_root/tests/runtime/run.py"
 timeout 10s bash "$repo_root/tests/native/run.sh" --test-admission "$build_dir/native-runner-guards"
-python3 -m unittest discover -v -s "$repo_root/tests/integration" -p test_registration.py
+python3 -m unittest discover -v -s "$repo_root/tests/integration" -p 'test_*.py'
 python3 -m unittest discover -v -s "$repo_root/tests" -p 'test_integration_*.py'
 python3 -m unittest discover -v -s "$repo_root/tests/native" -p test_controls.py
 python3 -m unittest discover -v -s "$repo_root/tests" -p test_python_assertion_admission.py

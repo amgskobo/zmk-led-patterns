@@ -131,7 +131,7 @@ static void test_stale_backward_future_reset(void) {
     quiet = true;
     until(260000);
     quiet = false;
-    struct led_sync_clock_fit old = peer.active_clock;
+    struct led_sync_clock_fit old = peer.active.clock;
     desire(67);
     while (!peer.pending.valid && now < 261000)
         step();
@@ -619,7 +619,7 @@ static void test_new_session_retires_obsolete_render(bool has_previous, bool suc
     until(old_edge);
     assert(led_sync_advance(&peer, peer_now(now)));
     assert(!peer.active_rendered && peer.previous.valid == has_previous);
-    struct led_sync_clock_fit old_fit = peer.active_clock;
+    struct led_sync_clock_fit old_fit = peer.active.clock;
     /* Only the central restarts. The untouched peer's old PWM call remains
      * outside its mutex while the new session's real startup exchange runs. */
     central.suspended = true;
