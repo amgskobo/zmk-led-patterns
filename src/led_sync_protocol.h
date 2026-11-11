@@ -86,11 +86,11 @@ struct led_sync_packet {
 _Static_assert(sizeof(struct led_sync_packet) == 64, "LED internal packet shape changed");
 
 struct led_sync_plan {
-    bool valid, confirmed, reset_phase;
-    uint32_t sequence;
-    struct led_sync_state_wire wire;
     struct led_sync_clock_fit clock;
     uint64_t local_deadline;
+    uint32_t sequence;
+    struct led_sync_state_wire wire;
+    bool valid, confirmed, reset_phase;
 };
 /* Only presentation rolls back: desired edits, fitted clock/session and retry
  * accounting may have changed while PWM ran outside the metadata lock. */
@@ -100,30 +100,30 @@ struct led_sync_saved_presentation {
     uint64_t phase_floor, last_logical, rendered_at;
 };
 struct led_sync_engine {
-    bool central, linked, suspended, dirty, reset_phase, clock_ready;
+    struct led_sync_clock_fit fit, active_clock;
+    struct led_sync_plan pending, active;
+    struct led_sync_saved_presentation previous;
+    uint64_t phase_epoch, phase_floor, clock_due, clock_timeout, state_due;
+    uint64_t request_due, confirmation_due;
+    uint64_t t1, t2, t3, t4, last_logical;
+    uint64_t rendered_at;
+    struct led_sync_packet reply, fit_ack, ack;
     uint32_t boot, epoch, peer_boot, peer_epoch, central_boot, central_epoch;
     uint32_t sequence, clock_sequence, candidate_sequence;
     uint32_t candidate_boot, candidate_epoch, candidate_peer_epoch;
     uint32_t challenge_counter, highest_central_epoch;
-    uint8_t clock_attempts, state_attempts, plan_attempts, request_attempts;
-    bool transaction_active, exhausted, replay_previous, resume_pending;
     uint32_t completed_sequence, hint_boot, hint_epoch, resume_after_sequence;
     uint32_t request_boot, request_epoch, retired_peer_boot[4];
-    uint8_t retired_peer_next;
     uint32_t quantization_ms;
-    enum led_sync_stage stage;
     struct led_sync_values desired, visible, transaction_desired;
-    struct led_sync_clock_fit fit, active_clock;
-    struct led_sync_plan pending, active;
-    uint64_t phase_epoch, phase_floor, clock_due, clock_timeout, state_due;
-    uint64_t request_due, confirmation_due;
-    uint64_t t1, t2, t3, t4, last_logical;
+    bool central, linked, suspended, dirty, reset_phase, clock_ready;
+    uint8_t clock_attempts, state_attempts, plan_attempts, request_attempts;
+    bool transaction_active, exhausted, replay_previous, resume_pending;
+    uint8_t retired_peer_next;
+    enum led_sync_stage stage;
     bool have_active, reply_pending, fit_pending, fit_ack_pending, ack_pending;
     bool active_rendered;
     uint8_t active_failure;
-    uint64_t rendered_at;
-    struct led_sync_saved_presentation previous;
-    struct led_sync_packet reply, fit_ack, ack;
 };
 
 static inline bool led_sync_values_equal(const struct led_sync_values *a,
